@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.idea/
+
+# local data and runs
+data/
+runs/
+*.xlsx
+data_sample_check.png
+
+# credentials and one-off probe artifacts (never push)
+accounts.json
+apidocs.json
+probe_api*.py
+report_v3_extracted.txt

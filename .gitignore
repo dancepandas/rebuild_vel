@@ -14,3 +14,4 @@ accounts.json
 apidocs.json
 probe_api*.py
 report_v3_extracted.txt
+reports/*.docx

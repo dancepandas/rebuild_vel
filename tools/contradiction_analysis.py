@@ -98,7 +98,7 @@ def main() -> int:
                 k = int(np.asarray(s["line_mask"]).sum())
                 pred_chunks.append(row[:k])
             offset += len(pb)
-        pred = np.concatenate(pred_chunks) * norm.v_sd + norm.v_mu
+        pred = norm.physical_target(np.concatenate(pred_chunks))
 
         obs = has_raw & np.isfinite(raw_mean)
         rm, tg, st, pd_ = raw_mean[obs], target[obs], stations[obs], pred[obs]

@@ -115,7 +115,8 @@ def main() -> int:
         model = RebuildVelocityModel(
             d_model=cfg.get("d_model", 768), num_heads=cfg.get("num_heads", 12),
             num_layers=cfg.get("num_layers", 14), ffn_dim=cfg.get("ffn_dim", 2304),
-            dropout=0.0, raw_hidden=cfg.get("raw_hidden", 64)).to(args.device)
+            dropout=0.0, raw_hidden=cfg.get("raw_hidden", 64),
+            pure_attention=cfg.get("pure_attention", False)).to(args.device)
         model.load_state_dict(ckpt["model"]); model.eval()
         loader = DataLoader(dataset, batch_size=64, shuffle=False, collate_fn=collate_sections)
         preds: list[np.ndarray] = []
@@ -132,7 +133,7 @@ def main() -> int:
                 ys.append(np.asarray(sample["target_physical"])[mask])
                 srcs.extend(["stiv" if int(sample.get("raw_source_id", 0)) == 0 else "of"] * int(mask.sum()))
             off += len(pred)
-        x = np.concatenate(xs) * norm.v_sd + norm.v_mu
+        x = norm.physical_target(np.concatenate(xs))
         y = np.concatenate(ys)
         src_arr = np.array(srcs)
         if len(x) > args.max_scatter:

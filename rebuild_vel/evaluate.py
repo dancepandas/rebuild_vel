@@ -113,7 +113,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ):
             mask = sample["line_mask"].astype(bool)
             k = int(mask.sum())
-            pred_chunks.append(row[:len(mask)][:k] * norm.v_sd + norm.v_mu)
+            pred_chunks.append(norm.physical_target(row[:len(mask)][:k]))
             target_chunks.append(np.asarray(sample["target_physical"])[:k])
             state_chunks.append(line_state[:k])
         offset += len(pred)

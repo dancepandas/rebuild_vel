@@ -86,7 +86,7 @@ def load_predictions(args):
             k = int(mask.sum())
             if k < 1:
                 continue
-            p = row[:len(mask)][:k] * norm.v_sd + norm.v_mu
+            p = norm.physical_target(row[:len(mask)][:k])
             t = np.asarray(sample["target_physical"])[:k]
             raw = np.asarray(sample["raw_seq_v"], dtype=np.float64)[:k] * norm.v_sd
             valid = np.asarray(sample["raw_seq_valid"], dtype=bool)[:k]

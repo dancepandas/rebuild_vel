@@ -42,6 +42,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--ffn-dim", type=int, default=2304)
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--raw-hidden", type=int, default=64)
+    parser.add_argument("--target-transform", action="store_true",
+                        help="Yeo-Johnson transform the target (Box-Cox family, "
+                             "handles the zero mass) before the L2 loss")
     parser.add_argument("--pure-attention", action="store_true",
                         help="disable the morphology attention bias (vanilla attention)")
     parser.add_argument("--loss-mode", default="full", choices=["full", "mse_only"])
@@ -78,7 +81,8 @@ class LengthBucketingSampler:
         return [order[i:i + self.batch_size] for i in range(0, len(order), self.batch_size)]
 
 
-def evaluate(model: Any, loader: Any, criterion: Any, device: str) -> dict[str, float]:
+def evaluate(model: Any, loader: Any, criterion: Any, device: str,
+             norm: Any = None) -> dict[str, float]:
     import torch
 
     model.eval()
@@ -92,6 +96,10 @@ def evaluate(model: Any, loader: Any, criterion: Any, device: str) -> dict[str, 
     loss_sum = 0.0
     term_sums = {"smooth": 0.0, "depth_corr": 0.0, "bank": 0.0,
                  "bank_zero": 0.0, "grad_smooth": 0.0}
+    phys_res2 = 0.0
+    phys_abs = 0.0
+    phys_bias = 0.0
+    phys_n = 0
     with torch.no_grad():
         for batch in loader:
             batch = {key: value.to(device) for key, value in batch.items()}
@@ -109,8 +117,16 @@ def evaluate(model: Any, loader: Any, criterion: Any, device: str) -> dict[str, 
             sae += float(diff.sum().item())
             sum_pred += float(output["velocity_pred"].masked_select(mask).sum().item())
             sum_target += float(batch["target"].masked_select(mask).sum().item())
+            if norm is not None:
+                pp = norm.physical_target(output["velocity_pred"].cpu().numpy())
+                tt = norm.physical_target(batch["target"].cpu().numpy())
+                d = (pp - tt)[mask.cpu().numpy()]
+                phys_res2 += float((d ** 2).sum())
+                phys_abs += float(np.abs(d).sum())
+                phys_bias += float(d.sum())
+                phys_n += d.size
     rmse = math.sqrt(sse / max(count, 1))
-    return {
+    out = {
         "rmse_norm": rmse,
         "mae_norm": sae / max(count, 1),
         "bias_norm": (sum_pred - sum_target) / max(count, 1),
@@ -120,6 +136,11 @@ def evaluate(model: Any, loader: Any, criterion: Any, device: str) -> dict[str, 
         **{f"{name}_norm": value / max(count, 1) for name, value in term_sums.items()},
         "count": float(count),
     }
+    if norm is not None and phys_n:
+        out["rmse_physical"] = math.sqrt(phys_res2 / phys_n)
+        out["mae_physical"] = phys_abs / phys_n
+        out["bias_physical"] = phys_bias / phys_n
+    return out
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -140,7 +161,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # norm stats must come from the training split only
     train_sections = _select_split_sections(sections, "train", args.seed)
-    norm = compute_norm_stats(train_sections)
+    norm = compute_norm_stats(train_sections, target_transform=args.target_transform)
     logger.info("norm: v_mu=%.4f v_sd=%.4f raw_v_max=%.2f stations=%d",
                 norm.v_mu, norm.v_sd, norm.raw_v_max, len({s['station'] for s in train_sections}))
 
@@ -230,10 +251,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                   "train_loss": train_loss,
                                   "seconds": time.time() - started}
         if epoch % args.eval_every == 0 and len(val_set):
-            val_stats = evaluate(model, val_loader, criterion, device)
+            val_stats = evaluate(model, val_loader, criterion, device, norm=norm)
             record.update({f"val_{k}": v for k, v in val_stats.items()})
-            val_rmse = val_stats["rmse_norm"] * norm.v_sd
-            record["val_rmse_physical"] = val_rmse
+            # with a target transform the normalized RMSE lives in transform
+            # space; the RMSE-selected checkpoint must stay comparable across
+            # runs, so it is chosen on physical m/s
+            val_rmse_phys = val_stats.get("rmse_physical", val_stats["rmse_norm"] * norm.v_sd)
+            record["val_rmse_physical"] = val_rmse_phys
             # primary selection: composite loss = the objective itself; the
             # RMSE-selected checkpoint is kept alongside for divergence comparison
             if val_stats["composite_norm"] < best_val:
@@ -243,12 +267,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             "epoch": epoch,
                             "selected_by": "composite"}, run_dir / "best.pt")
                 record["best"] = True
-            if val_stats["rmse_norm"] < best_val_rmse:
-                best_val_rmse = val_stats["rmse_norm"]
+            if val_rmse_phys < best_val_rmse:
+                best_val_rmse = val_rmse_phys
                 torch.save({"model": model.state_dict(),
                             "config": run_config,
                             "epoch": epoch,
-                            "selected_by": "rmse"}, run_dir / "best_by_rmse.pt")
+                            "selected_by": "rmse_physical"}, run_dir / "best_by_rmse.pt")
                 record["best_by_rmse"] = True
         history.append(record)
         logger.info(
@@ -271,11 +295,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     checkpoint = torch.load(restore_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model"])
     if len(test_set):
-        test_stats = evaluate(model, test_loader, criterion, device)
-        # scale only the physical-unit metrics; the composite and physics
-        # terms stay in normalized units (physics terms don't scale with v_sd)
-        test_stats = {k: (v * norm.v_sd if k in ("rmse_norm", "mae_norm", "bias_norm") else v)
-                      for k, v in test_stats.items()}
+        test_stats = evaluate(model, test_loader, criterion, device, norm=norm)
+        if norm.target_lambda is None:
+            # legacy z-score target: the normalized metrics are a pure rescale
+            # of physical units, so reporting them in m/s under the old names
+            # is exact
+            test_stats = {k: (v * norm.v_sd if k in ("rmse_norm", "mae_norm", "bias_norm") else v)
+                          for k, v in test_stats.items()}
+        else:
+            # transformed target: rmse_norm/mae_norm/bias_norm live in transform
+            # space and must not be dressed up as physical (a previous version
+            # multiplied them by v_sd, which reads as m/s but is not).  Rename
+            # them; the physical metrics are reported separately below.
+            test_stats = {
+                (k[:-5] + "_transform" if k in ("rmse_norm", "mae_norm", "bias_norm") else k): v
+                for k, v in test_stats.items()}
         logger.info("test: %s", {k: round(v, 4) for k, v in test_stats.items()})
         (run_dir / "test_metrics.json").write_text(
             json.dumps(test_stats, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

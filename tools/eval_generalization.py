@@ -98,7 +98,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             groups_station.extend([station] * n)
             groups_device.extend([f"{station}|{device}"] * n)
             groups_source.extend([source] * n)
-            pred_lines.append(row[mask] * norm.v_sd + norm.v_mu)
+            pred_lines.append(norm.physical_target(row[mask]))
             target_lines.append(np.asarray(sample["target_physical"])[mask])
         offset += len(batch_pred)
     pred = np.concatenate(pred_lines)

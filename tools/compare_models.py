@@ -69,7 +69,7 @@ def collect(checkpoint: str, data: str, device: str):
         for row, sample in zip(pred, dataset.samples[off:off + len(pred)]):
             mask = sample["line_mask"].astype(bool)
             k = int(mask.sum())
-            p = row[:len(mask)][:k] * norm.v_sd + norm.v_mu
+            p = norm.physical_target(row[:len(mask)][:k])
             t = np.asarray(sample["target_physical"])[:k]
             line_state = np.asarray(dataset.line_states[global_idx])[:k]
             algo = line_state == 0  # STATE_ALGO
@@ -122,6 +122,44 @@ def summarize(rows, tag):
     return out
 
 
+def print_table(results: dict) -> None:
+    """Side-by-side N-model table (* marks the best cell of each row)."""
+    labels = list(results)
+    width = max(16, max(len(label) for label in labels) + 2)
+    print(f"\n{'指标':<28}" + "".join(f"{label:>{width}}" for label in labels))
+
+    def line(name, values, fmt="{:.4f}", lower_is_better=True, key=None):
+        keys = [key(v) for v in values] if key else list(values)
+        good = min(keys) if lower_is_better else max(keys)
+        cells = "".join(
+            f"{(fmt.format(value) + ('*' if k == good and len(values) > 1 else '')):>{width}}"
+            for value, k in zip(values, keys))
+        print(f"{name:<28}{cells}")
+
+    def pick(getter):
+        return [getter(results[label]) for label in labels]
+
+    line("总体 RMSE", pick(lambda r: r["overall"]["rmse"]))
+    line("总体 MAE", pick(lambda r: r["overall"]["mae"]))
+    line("总体 NSE", pick(lambda r: r["overall"]["nse"]), lower_is_better=False)
+    line("总体 bias(近零为优)", pick(lambda r: r["overall"]["bias"]), key=abs)
+    for name in BIN_NAMES:
+        if all(name in results[label]["bins"] for label in labels):
+            line(f"  分段 {name} RMSE", pick(lambda r: r["bins"][name]["rmse"]))
+            line(f"  分段 {name} bias", pick(lambda r: r["bins"][name]["bias"]))
+    line("零速线平均预测", pick(lambda r: r["zero_lines"]["mean_pred"]))
+    line("零速线 RMSE", pick(lambda r: r["zero_lines"]["rmse"]))
+    line("零速线 pred>0.1 占比", pick(lambda r: r["zero_lines"]["frac_pred_gt_0p1"]))
+    line("高速线(≥2) bias", pick(lambda r: r["high_lines"]["bias"]))
+    line("高速线严重低估占比", pick(lambda r: r["high_lines"]["frac_under_0p5"]))
+    line("分歧>0.5 占比", pick(lambda r: r["disagreement"]["gt_0.5"]["frac"]))
+    line("算法线 RMSE", pick(lambda r: r["algo"]["rmse"]))
+    line("插值线 RMSE", pick(lambda r: r["interp"]["rmse"]))
+    line("光流-only RMSE", pick(lambda r: r["of_only"]["rmse"]))
+    if len(labels) > 1:
+        print(f"{'':<28}{'* = 该行最优':>{width}}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="data/vel")
@@ -142,30 +180,7 @@ def main() -> int:
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.output).write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    labels = list(results)
-    a, b = results[labels[0]], results[labels[1]]
-    print(f"\n{'指标':<28}{labels[0]:>16}{labels[1]:>16}")
-    def line(name, va, vb, fmt="{:.4f}"):
-        print(f"{name:<28}{fmt.format(va):>16}{fmt.format(vb):>16}")
-    line("总体 RMSE", a["overall"]["rmse"], b["overall"]["rmse"])
-    line("总体 MAE", a["overall"]["mae"], b["overall"]["mae"])
-    line("总体 NSE", a["overall"]["nse"], b["overall"]["nse"])
-    line("总体 bias", a["overall"]["bias"], b["overall"]["bias"])
-    for name in BIN_NAMES:
-        ba, bb = a["bins"].get(name), b["bins"].get(name)
-        if ba and bb:
-            line(f"  分段 {name} RMSE", ba["rmse"], bb["rmse"])
-            line(f"  分段 {name} bias", ba["bias"], bb["bias"])
-    line("零速线平均预测", a["zero_lines"]["mean_pred"], b["zero_lines"]["mean_pred"])
-    line("零速线 RMSE", a["zero_lines"]["rmse"], b["zero_lines"]["rmse"])
-    line("零速线 pred>0.1 占比", a["zero_lines"]["frac_pred_gt_0p1"], b["zero_lines"]["frac_pred_gt_0p1"])
-    line("高速线(≥2) bias", a["high_lines"]["bias"], b["high_lines"]["bias"])
-    line("高速线严重低估占比", a["high_lines"]["frac_under_0p5"], b["high_lines"]["frac_under_0p5"])
-    line("分歧>0.5 占比", a["disagreement"]["gt_0.5"]["frac"], b["disagreement"]["gt_0.5"]["frac"])
-    line("算法线 RMSE", a["algo"]["rmse"], b["algo"]["rmse"])
-    line("插值线 RMSE", a["interp"]["rmse"], b["interp"]["rmse"])
-    line("光流-only RMSE", a["of_only"]["rmse"], b["of_only"]["rmse"])
+    print_table(results)
     return 0
 
 

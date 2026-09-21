@@ -65,6 +65,11 @@ class NormStats:
     raw_v_max: float
     global_mu: np.ndarray  # [N_GLOBAL]
     global_sd: np.ndarray  # [N_GLOBAL]
+    # optional Yeo-Johnson target transform (fitted on the training split
+    # only); None keeps the plain z-score target of the earlier runs
+    target_lambda: Optional[float] = None
+    target_mu: float = 0.0
+    target_sd: float = 1.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +78,9 @@ class NormStats:
             "raw_v_max": self.raw_v_max,
             "global_mu": self.global_mu.tolist(),
             "global_sd": self.global_sd.tolist(),
+            "target_lambda": self.target_lambda,
+            "target_mu": self.target_mu,
+            "target_sd": self.target_sd,
         }
 
     @staticmethod
@@ -83,7 +91,48 @@ class NormStats:
             raw_v_max=float(payload.get("raw_v_max", 6.0)),
             global_mu=np.asarray(payload["global_mu"], dtype=np.float64),
             global_sd=np.asarray(payload["global_sd"], dtype=np.float64),
+            target_lambda=payload.get("target_lambda"),
+            target_mu=float(payload.get("target_mu", 0.0)),
+            target_sd=float(payload.get("target_sd", 1.0)),
         )
+
+    def norm_target(self, v_physical: np.ndarray) -> np.ndarray:
+        """Physical velocities -> model target (YJ-transform if fitted)."""
+        from scipy.stats import yeojohnson
+
+        z = (np.asarray(v_physical, dtype=np.float64) - self.v_mu) / self.v_sd
+        if self.target_lambda is None:
+            return z.astype(np.float32)
+        yt = yeojohnson(z, lmbda=self.target_lambda)
+        return ((yt - self.target_mu) / self.target_sd).astype(np.float32)
+
+    def physical_target(self, z: np.ndarray) -> np.ndarray:
+        """Model target -> physical velocities (inverse of norm_target)."""
+        z = np.asarray(z, dtype=np.float64)
+        if self.target_lambda is None:
+            return z * self.v_sd + self.v_mu
+        yt = z * self.target_sd + self.target_mu
+        lam = self.target_lambda
+        # Analytic Yeo-Johnson inverse, both branches: standardized velocities
+        # span negatives, so the y<0 branch is live for slow lines.  Each
+        # branch is evaluated only on its own mask (np.where would still
+        # evaluate the other one and raise spurious invalid-value warnings),
+        # and the base is clamped because reaching it *is* the transform's
+        # asymptote -- a model output far outside the training range maps to
+        # the boundary instead of poisoning the metrics with NaN.
+        x_std = np.empty_like(yt)
+        pos = yt >= 0
+        if abs(lam) < 1e-9:
+            x_std[pos] = np.expm1(yt[pos])
+        else:
+            x_std[pos] = np.power(np.maximum(yt[pos] * lam + 1.0, 0.0), 1.0 / lam) - 1.0
+        neg = ~pos
+        if abs(lam - 2.0) < 1e-9:
+            x_std[neg] = 1.0 - np.exp(-yt[neg])
+        else:
+            c = 2.0 - lam
+            x_std[neg] = 1.0 - np.power(np.maximum(1.0 - c * yt[neg], 0.0), 1.0 / c)
+        return x_std * self.v_sd + self.v_mu
 
 
 def load_shards(root: str | Path) -> list[dict[str, Any]]:
@@ -114,8 +163,16 @@ def compute_bank_and_grad(
     return bank.astype(np.float32), np.clip(grad_norm, 0.0, 1.0).astype(np.float32)
 
 
-def compute_norm_stats(sections: Sequence[dict[str, Any]]) -> NormStats:
-    """Training-split standardization for velocity and global features."""
+def compute_norm_stats(
+    sections: Sequence[dict[str, Any]], target_transform: bool = False
+) -> NormStats:
+    """Training-split standardization for velocity and global features.
+
+    With ``target_transform`` a Yeo-Johnson power transform (Box-Cox family,
+    handles the exact-zero mass) is fitted on the training targets and the
+    normalized target becomes the standardized transformed velocity; the
+    fitted lambda plus the transformed mean/std are stored for the inverse.
+    """
     targets = np.concatenate([np.asarray(s["v_surface"], dtype=np.float64) for s in sections])
     raw_vals = []
     for section in sections:
@@ -123,12 +180,30 @@ def compute_norm_stats(sections: Sequence[dict[str, Any]]) -> NormStats:
         raw_vals.append(np.asarray(section["raw_v"], dtype=np.float64)[valid])
     raw = np.concatenate(raw_vals) if raw_vals else np.asarray([0.0])
     globals_ = np.stack([_global_features(s) for s in sections]).astype(np.float64)
+
+    t_lambda: Optional[float] = None
+    t_mu, t_sd = 0.0, 1.0
+    v_mu = float(targets.mean())
+    v_sd = float(targets.std()) or 1.0
+    if target_transform:
+        from scipy.stats import yeojohnson, yeojohnson_normmax
+
+        # fit on the *standardized* target - that is exactly what norm_target
+        # feeds to yeojohnson, and lambda is not scale-equivariant
+        z_train = (targets - v_mu) / v_sd
+        lam = float(yeojohnson_normmax(z_train))
+        yt = yeojohnson(z_train, lmbda=lam)
+        t_lambda, t_mu, t_sd = lam, float(yt.mean()), float(yt.std()) or 1.0
+
     return NormStats(
-        v_mu=float(targets.mean()),
-        v_sd=float(targets.std()) or 1.0,
+        v_mu=v_mu,
+        v_sd=v_sd,
         raw_v_max=float(max(np.percentile(np.abs(raw), 99.5), 1.0)),
         global_mu=globals_.mean(axis=0),
         global_sd=globals_.std(axis=0) + 1e-6,
+        target_lambda=t_lambda,
+        target_mu=t_mu,
+        target_sd=t_sd,
     )
 
 
@@ -244,7 +319,7 @@ def build_sample(
     raw_source_id = SOURCE_IDS.get(source_name, N_SOURCES - 1)
 
     target_physical = np.asarray(section["v_surface"], dtype=np.float32)
-    target = ((target_physical - norm.v_mu) / norm.v_sd).astype(np.float32)
+    target = norm.norm_target(target_physical)
 
     globals_ = (_global_features(section).astype(np.float64) - norm.global_mu) / norm.global_sd
     globals_ = np.where(np.isfinite(globals_), globals_, 0.0).astype(np.float32)

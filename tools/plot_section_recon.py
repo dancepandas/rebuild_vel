@@ -67,7 +67,7 @@ def main() -> int:
         for row, sample in zip(pred, dataset.samples[off:off + len(pred)]):
             mask = sample["line_mask"].astype(bool)
             k = int(mask.sum())
-            p = row[:len(mask)][:k] * norm.v_sd + norm.v_mu
+            p = norm.physical_target(row[:len(mask)][:k])
             t = np.asarray(sample["target_physical"])[:k]
             depth = np.abs(sample["morphology"][:k, 1])  # d_norm channel
             # raw per-segment observations, back to physical units

@@ -12,18 +12,22 @@ const P = (runs, o) => new Paragraph({
   spacing: { after: 100, line: 300 }, ...(o || {}),
   children: (Array.isArray(runs) ? runs : [runs]).map(r => typeof r === "string" ? T(r) : r),
 });
-const H1 = (t) => new Paragraph({ heading: HeadingLevel.HEADING_1, spacing: { before: 260, after: 120 }, children: [new TextRun(t)] });
-const H2 = (t) => new Paragraph({ heading: HeadingLevel.HEADING_2, spacing: { before: 180, after: 100 }, children: [new TextRun(t)] });
+const H1 = (t) => new Paragraph({ heading: HeadingLevel.HEADING_1, keepNext: true, spacing: { before: 260, after: 120 }, children: [new TextRun(t)] });
+const H2 = (t) => new Paragraph({ heading: HeadingLevel.HEADING_2, keepNext: true, spacing: { before: 180, after: 100 }, children: [new TextRun(t)] });
 
 const FIG = (file, widthPx, caption) => {
   const norm = file.replace(/\\/g, "/");
   const [w, h] = SIZES[norm] || SIZES[norm.split("/").pop()] || [1400, 900];
+  // cap both dimensions to the usable page area so Word never pushes an
+  // oversized image to its own (mostly blank) page
+  const MAXW = Math.min(widthPx, 600), MAXH = 780;
+  const scale = Math.min(MAXW / w, MAXH / h, 1);
   return [
     new Paragraph({
-      alignment: AlignmentType.CENTER, spacing: { before: 140, after: 40 },
+      alignment: AlignmentType.CENTER, keepNext: true, spacing: { before: 140, after: 40 },
       children: [new ImageRun({
         type: "png", data: fs.readFileSync(file),
-        transformation: { width: widthPx, height: Math.round(widthPx * h / w) },
+        transformation: { width: Math.round(w * scale), height: Math.round(h * scale) },
       })],
     }),
     new Paragraph({
@@ -116,8 +120,10 @@ const children = [
   H1("三、总体结果"),
   P([T("检查点取验证 RMSE 最优的 ep26（物理版）/ ep19（纯净版）。站级测试集（40 站、182.4 万条测速线，训练全程未见）总体："),
      B("物理版 RMSE 0.364 / NSE 0.814 / bias +0.056；纯净版 RMSE 0.342 / NSE 0.835 / bias +0.023"), T("。")]),
+  ...FIG("runs/v1/report_figs/fig_density.png", 430,
+    "图 1  物理版重建流速 vs 目标流速密度图（测试集全量 182 万线，对数色标）。低速段散布在对角线上方（正偏置），高速段被压向均值。"),
   ...FIG("runs/v1_mse/report_figs/fig_density.png", 430,
-    "图 1  纯净版重建流速 vs 目标流速密度图（测试集全量 182 万线，对数色标）。主对角带紧密；虚线 y=x，灰带 ±0.3 m/s。"),
+    "图 2  纯净版同口径密度图。主对角带更紧密，[0.2,0.5) 段抬升效应明显减弱；虚线 y=x，灰带 ±0.3 m/s。"),
   TB([2600, 2250, 2250, 2260], [
     tbRow([tbCell("指标", { head: true, fill: "D9E2F3", w: 2600 }), tbCell("物理版", { head: true, fill: "D9E2F3", w: 2250 }), tbCell("纯净版", { head: true, fill: "D9E2F3", w: 2250 }), tbCell("原始中位数基线", { head: true, fill: "D9E2F3", w: 2260 })]),
     tbRow([tbCell("RMSE (m/s)", { left: true, bold: true }), tbCell("0.364"), tbCell("0.342"), tbCell("0.764")]),
@@ -144,16 +150,28 @@ const children = [
 
   H1("五、跨站 / 跨设备 / 分源泛化"),
   ...FIG("runs/v1/report_figs/fig_by_station.png", 620,
-    "图 2  物理版各测试站 RMSE（左，红=RMSE>0.8）与 NSE（右，灰=近常数站指标退化，†标记）。两版跨站分布形态相似；纯净版中位 RMSE 0.263 更好，但 p90 0.677 更差。"),
+    "图 3  物理版各测试站 RMSE（左，红=RMSE>0.8）与 NSE（右，灰=近常数站指标退化，†标记）。两版跨站分布形态相似；纯净版中位 RMSE 0.263 更好，但 p90 0.677 更差。"),
   P([T("站级中位：物理版 RMSE 0.289 / NSE 0.744；纯净版 RMSE 0.263 / NSE 0.637。纯净版中位 RMSE 更好但 "), B("NSE 中位反而更低"),
      T("，且 p90（0.677 对 0.464）更差——它的误差分布更两极：多数站更好，少数站（观测薄弱型）更差。最差站两版一致：站 00423（RMSE 1.14 / 1.17）与站 00156（0.98 / 1.03），后者即「原始观测 8+ m/s、目标 0.1」的观测-目标矛盾站（原始 STIV 超出河流物理上限，详见 journal）。")]),
   P([B("分源是两版最大的分野："), T("光流-only 测次物理版 RMSE 0.281 / NSE 0.846，纯净版 0.471 / 0.567。解释：物理版的形态偏置注意力把「水深、岸别、坡度」的结构先验直接注入注意力，在原始观测稀疏（光流-only 每线常只有 1 个估计）时兜底；纯净版只能依赖 RoPE 与嵌入里的形态通道，观测一弱就漂。STIV 测次（占 98.9%）纯净版反而更好（0.341 对 0.364）。")]),
 
+  H2("5.1 观测-目标矛盾的普遍性检验（最终模型复核）"),
+  P([T("对站 00156 的「原始观测 8+ m/s 对目标 0.1 m/s」现象做了全测试集复核。"), B("矛盾普遍存在但低发，个别站集中"),
+     T("：全测试集 182 万条有观测的线中，观测远大于目标（差值 >max(0.5, 1.5×目标)）的占 "), B("5.4%"),
+     T("（矛盾线上观测中位 2.21 m/s 对目标中位 0.21，约 10 倍），观测远小于目标的占 4.6%，合计约 10%；其余 90% 的线观测与目标基本一致（相关系数 r=0.722）。分站看，矛盾率中位仅 5.9%，"),
+     B("只有 2/37 个站的矛盾率超过 20%"), T("（站 00156 为最严重者，全库 1,727 个断面、原始观测段均值中位 0.25 m/s 对目标 0.09 m/s，最差断面单线达 8.7 m/s）。")]),
+  P([T("用最终两版检查点复核该站：物理版 1,727 断面 / 63,899 线上 RMSE 1.020（预测均值 0.75 对目标 0.158），纯净版 RMSE 0.791（预测均值 0.47）——两版都部分跟随了被高估的原始观测，但纯净版跟随程度更低。")]),
+  P([B("对模型可靠性的含义"), T("：在 90% 观测-目标一致的线上，两版都可靠（RMSE：物理版 0.270、纯净版 0.244）；矛盾线上误差升至 0.80–0.82（约 3 倍），且两版在矛盾方向的追随权重都很低（0.05–0.18），说明模型总体保守、并未普遍盲从观测。因此「监测质量不是完全垃圾即产出可靠结果」成立；对约 10% 的矛盾线（其中 2 个集中站贡献最大），以「原始观测与目标剧烈分歧」为特征即可自动筛出送人工复核——该规则无需模型参与，一行判据即可上线。")]),
+
   H1("六、断面重建案例"),
   ...FIG("runs/v1/report_figs/fig_sections.png", 600,
-    "图 1  物理版：最好 / 中位 / 最差（观测-目标矛盾）/ 枯水 / 光流-only 五类断面。枯水区预测≈0，「没水→流速 0」规律已学会。"),
+    "图 4  物理版：最好 / 中位 / 最差（观测-目标矛盾）/ 枯水 / 光流-only 五类断面。枯水区预测≈0，「没水→流速 0」规律已学会。"),
   ...FIG("runs/v1_mse/report_figs/fig_sections.png", 600,
-    "图 2  纯净版：同五类断面。低速段跟随更紧，但枯水区偶有 0.1–0.2 m/s 的虚增速（物理版没有）。"),
+    "图 5  纯净版：同五类断面。低速段跟随更紧，但枯水区偶有 0.1–0.2 m/s 的虚增速（物理版没有）。"),
+  ...FIG("runs/v1/report_figs/fig_training_curves.png", 620,
+    "图 6  物理版损失与验证 RMSE 曲线（ep70 停止时止）。最优停在 ep26，其后 44 epoch 平台。"),
+  ...FIG("runs/v1_mse/report_figs/fig_training_curves.png", 620,
+    "图 7  纯净版损失与验证 RMSE 曲线（ep87 停止时止）。最优停在 ep19，但整体水平低于物理版。"),
 
   H1("七、结论"),
   P([B("结论 1（损失函数）："), T("物理正则是回归趋中的直接成因之一。纯净版总体 RMSE 好 6%、bias 减半、剧烈分歧率从 8.7% 降到 6.6%——纯 L2 让模型对「该 0 就 0、该大就大」的响应更忠实。")]),

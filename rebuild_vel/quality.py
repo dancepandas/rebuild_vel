@@ -22,6 +22,25 @@ class QualityOptions:
     min_nonzero_lines: int = 3
     max_duplicate_x: float = 1e-6
     max_dominant_value_fraction: float = 0.8
+    min_raw_rows: int = 1                # input-side gate: a section with no raw
+                                         # observations is unusable as training data
+    raw_tolerance: float = 0.0           # metres; <=0 derives it from line spacing
+
+#: raw-velocity tables in the procedure workbook, in priority order. Devices
+#: differ in which one they populate; STIV wins when more than one has rows.
+RAW_SOURCES = ("stiv", "of", "of_traj")
+
+#: per-observation auxiliary channels packed alongside the velocity sequence;
+#: only the optical-flow sheets carry these columns, STIV rows leave them NaN
+RAW_AUX_KEYS = ("region_mean", "std", "max_v", "min_v",
+                "direction_ratio", "pixel_scale", "vertical_v")
+RAW_AUX_CHANNELS = len(RAW_AUX_KEYS)
+
+_RAW_MEASUREMENT_KEY = {
+    "stiv": "raw_stiv",
+    "of": "raw_of",
+    "of_traj": "raw_of_traj",
+}
 
 
 def _finite(value: Any) -> float:
@@ -99,10 +118,25 @@ def clean_measurement(
     if not is_algo.any():
         raise SectionQualityError("no_algorithm_lines", "section has no algorithm-given lines")
 
-    # -- align raw STIV segments to lines ----------------------------------
-    raw_v, raw_conf, raw_angle, raw_valid, raw_t0, raw_t1, raw_seg = _align_raw(
-        measurement.get("raw_stiv") or [], line_num, x
+    # -- pick the raw source and align its observations to the lines --------
+    # Devices differ in which raw table they fill; take the one that has data,
+    # preferring STIV when more than one does. Raw positions are a finer,
+    # differently-spaced grid than the target lines, so observations are
+    # matched by start distance rather than by 测速线序号 (which is a global row
+    # counter in the raw sheets, not a line index).
+    source, raw_rows = _select_raw_source(measurement, options)
+    if not raw_rows:
+        raise SectionQualityError(
+            "no_raw_input", "no raw velocity observations in any of the three raw tables")
+
+    tolerance = options.raw_tolerance if options.raw_tolerance > 0 else _default_tolerance(x)
+    raw_v, raw_conf, raw_angle, raw_valid, raw_t0, raw_t1, raw_seg, raw_x, raw_aux, dropped = _align_raw(
+        raw_rows, x, tolerance
     )
+    if not raw_valid.any():
+        raise SectionQualityError(
+            "no_raw_input",
+            f"{source} rows exist but none lie within {tolerance:.2f} m of a target line")
 
     return {
         "station": station,
@@ -132,12 +166,17 @@ def clean_measurement(
         "raw_t_start": raw_t0.astype(np.float32),
         "raw_t_end": raw_t1.astype(np.float32),
         "raw_segment_id": raw_seg.astype(np.float32),
-        "raw_pixel_length": _align_line_scalar(
-            measurement.get("raw_stiv") or [], line_num, "pixel_length"),
-        "raw_physical_length": _align_line_scalar(
-            measurement.get("raw_stiv") or [], line_num, "physical_length"),
+        "raw_x": raw_x.astype(np.float32),
+        "raw_aux": raw_aux.astype(np.float32),
+        "raw_source": source,
+        "raw_tolerance": tolerance,
+        "raw_pixel_length": _align_line_scalar(raw_rows, x, tolerance, "pixel_length"),
+        "raw_physical_length": _align_line_scalar(raw_rows, x, tolerance, "physical_length"),
+        "n_raw_stiv": len(measurement.get("raw_stiv") or []),
         "n_raw_of_traj": len(measurement.get("raw_of_traj") or []),
         "n_raw_of": len(measurement.get("raw_of") or []),
+        "n_raw_used": int(raw_valid.sum()),
+        "n_raw_dropped": int(dropped),
     }
 
 
@@ -149,20 +188,84 @@ def _finite_or_nan(value: Any) -> float:
     return result if np.isfinite(result) else float("nan")
 
 
+def _select_raw_source(
+    measurement: dict[str, Any],
+    options: QualityOptions,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Choose which raw table feeds the model input for this measurement.
+
+    Some devices populate only STIV, others only one of the optical-flow
+    tables. Whichever has rows is the input; when more than one does, STIV wins;
+    when STIV is empty the optical-flow table with more rows is used.
+    """
+    tables = {name: measurement.get(_RAW_MEASUREMENT_KEY[name]) or [] for name in RAW_SOURCES}
+    counts = {name: len(rows) for name, rows in tables.items()}
+    if counts["stiv"] >= options.min_raw_rows:
+        return "stiv", tables["stiv"]
+    best = max(RAW_SOURCES[1:], key=lambda name: counts[name])
+    if counts[best] >= options.min_raw_rows:
+        return best, tables[best]
+    return "", []
+
+
+def _default_tolerance(line_x: np.ndarray) -> float:
+    """Half the typical spacing between target lines, clamped to a sane range."""
+    if len(line_x) < 2:
+        return 1.0
+    gaps = np.diff(np.sort(line_x))
+    gaps = gaps[gaps > 1e-6]
+    if not len(gaps):
+        return 1.0
+    return float(np.clip(float(np.median(gaps)) / 2.0, 0.5, 5.0))
+
+
+def _assign_raw(
+    raw_rows: list[dict[str, Any]],
+    line_x: np.ndarray,
+    tolerance: float,
+) -> tuple[dict[int, list[dict[str, Any]]], int]:
+    """Bucket raw observations onto the nearest target line within ``tolerance``.
+
+    The raw grid is finer and differently spaced than the target lines, so a
+    line can collect several observations (different video segments, or the
+    same position seen from different work points).
+
+    Observations outside the span of the target lines are dropped rather than
+    clamped to the edge lines: the optical-flow trajectory table describes its
+    own sub-range of the cross-section, and folding a point that is metres
+    beyond the last line onto that line would fabricate input. Returns the
+    buckets and the number of dropped out-of-range rows.
+    """
+    assigned: dict[int, list[dict[str, Any]]] = {}
+    if not len(line_x):
+        return assigned, len(raw_rows)
+    lo = float(line_x.min()) - tolerance
+    hi = float(line_x.max()) + tolerance
+    dropped = 0
+    for row in raw_rows:
+        rx = _finite_or_nan(row.get("x"))
+        if not np.isfinite(rx) or rx < lo or rx > hi:
+            dropped += 1
+            continue
+        index = int(np.argmin(np.abs(line_x - rx)))
+        if abs(float(line_x[index]) - rx) <= tolerance:
+            assigned.setdefault(index, []).append(row)
+        else:
+            dropped += 1
+    return assigned, dropped
+
+
 def _align_raw(
     raw_rows: list[dict[str, Any]],
-    line_num: np.ndarray,
-    x: np.ndarray,
+    line_x: np.ndarray,
+    tolerance: float,
 ) -> tuple[np.ndarray, ...]:
-    """Group raw rows by line number and pad to [K, S_max]."""
-    by_line: dict[float, list[dict[str, Any]]] = {}
-    for row in raw_rows:
-        key = float(row.get("line_num", -1))
-        by_line.setdefault(key, []).append(row)
+    """Assign raw rows to target lines by start distance and pad to [K, S_max]."""
+    assigned, dropped = _assign_raw(raw_rows, line_x, tolerance)
 
-    counts = [len(by_line.get(float(ln), [])) for ln in line_num]
+    counts = [len(assigned.get(i, [])) for i in range(len(line_x))]
     s_max = max(counts) if counts else 0
-    k = len(line_num)
+    k = len(line_x)
     shape = (k, max(s_max, 1))
     raw_v = np.full(shape, np.nan, dtype=np.float64)
     raw_conf = np.full(shape, np.nan, dtype=np.float64)
@@ -171,11 +274,16 @@ def _align_raw(
     raw_t0 = np.full(shape, np.nan, dtype=np.float64)
     raw_t1 = np.full(shape, np.nan, dtype=np.float64)
     raw_seg = np.full(shape, np.nan, dtype=np.float64)
+    raw_x = np.full(shape, np.nan, dtype=np.float64)
+    raw_aux = np.full((k, max(s_max, 1), RAW_AUX_CHANNELS), np.nan, dtype=np.float64)
 
-    for i, ln in enumerate(line_num):
-        rows = sorted(by_line.get(float(ln), []), key=lambda r: (
-            _finite_or_nan(r.get("video_segment_id")),
+    for i in range(k):
+        rows = assigned.get(i)
+        if not rows:
+            continue
+        rows.sort(key=lambda r: (
             _finite_or_nan(r.get("t_start")),
+            _finite_or_nan(r.get("video_segment_id")),
         ))
         for j, row in enumerate(rows[: s_max]):
             raw_v[i, j] = _finite_or_nan(row.get("raw_v"))
@@ -184,17 +292,22 @@ def _align_raw(
             raw_t0[i, j] = _finite_or_nan(row.get("t_start"))
             raw_t1[i, j] = _finite_or_nan(row.get("t_end"))
             raw_seg[i, j] = _finite_or_nan(row.get("video_segment_id"))
+            raw_x[i, j] = _finite_or_nan(row.get("x"))
+            for c, key in enumerate(RAW_AUX_KEYS):
+                raw_aux[i, j, c] = _finite_or_nan(row.get(key))
             raw_valid[i, j] = np.isfinite(raw_v[i, j])
-    return raw_v, raw_conf, raw_angle, raw_valid, raw_t0, raw_t1, raw_seg
+    return raw_v, raw_conf, raw_angle, raw_valid, raw_t0, raw_t1, raw_seg, raw_x, raw_aux, dropped
 
 
-def _align_line_scalar(raw_rows: list[dict[str, Any]], line_num: np.ndarray, key: str) -> np.ndarray:
-    first: dict[float, float] = {}
-    for row in raw_rows:
-        ln = float(row.get("line_num", -1))
-        if ln not in first:
-            first[ln] = _finite_or_nan(row.get(key))
-    out = np.full(len(line_num), np.nan, dtype=np.float64)
-    for i, ln in enumerate(line_num):
-        out[i] = first.get(float(ln), float("nan"))
+def _align_line_scalar(
+    raw_rows: list[dict[str, Any]],
+    line_x: np.ndarray,
+    tolerance: float,
+    key: str,
+) -> np.ndarray:
+    """First observation's ``key`` per line (NaN where the table lacks the column)."""
+    assigned, _ = _assign_raw(raw_rows, line_x, tolerance)
+    out = np.full(len(line_x), np.nan, dtype=np.float64)
+    for i, rows in assigned.items():
+        out[i] = _finite_or_nan(rows[0].get(key))
     return out.astype(np.float32)

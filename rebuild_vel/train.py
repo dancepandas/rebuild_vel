@@ -30,18 +30,20 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--output", required=True, help="run directory")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=3e-4)
     parser.add_argument("--warmup-fraction", type=float, default=0.05)
     parser.add_argument("--min-lr-fraction", type=float, default=0.01)
-    parser.add_argument("--d-model", type=int, default=256)
-    parser.add_argument("--num-heads", type=int, default=8)
-    parser.add_argument("--num-layers", type=int, default=6)
-    parser.add_argument("--ffn-dim", type=int, default=512)
-    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--d-model", type=int, default=768)
+    parser.add_argument("--num-heads", type=int, default=12)
+    parser.add_argument("--num-layers", type=int, default=14)
+    parser.add_argument("--ffn-dim", type=int, default=2304)
+    parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--raw-hidden", type=int, default=64)
+    parser.add_argument("--pure-attention", action="store_true",
+                        help="disable the morphology attention bias (vanilla attention)")
     parser.add_argument("--loss-mode", default="full", choices=["full", "mse_only"])
     parser.add_argument("--max-train-samples", type=int, default=None,
                         help="cap training samples (smoke tests)")
@@ -85,6 +87,11 @@ def evaluate(model: Any, loader: Any, criterion: Any, device: str) -> dict[str, 
     count = 0
     sum_pred = 0.0
     sum_target = 0.0
+    # composite loss and per-term values, accumulated with the same weighting
+    # as mse so checkpoint selection can follow the full training objective
+    loss_sum = 0.0
+    term_sums = {"smooth": 0.0, "depth_corr": 0.0, "bank": 0.0,
+                 "bank_zero": 0.0, "grad_smooth": 0.0}
     with torch.no_grad():
         for batch in loader:
             batch = {key: value.to(device) for key, value in batch.items()}
@@ -95,6 +102,9 @@ def evaluate(model: Any, loader: Any, criterion: Any, device: str) -> dict[str, 
             n = int(mask.sum().item())
             count += n
             sse += float(stats["mse"].item()) * n
+            loss_sum += float(stats["loss"].item()) * n
+            for name in term_sums:
+                term_sums[name] += float(stats[name].item()) * n
             diff = (output["velocity_pred"] - batch["target"]).abs().masked_select(mask)
             sae += float(diff.sum().item())
             sum_pred += float(output["velocity_pred"].masked_select(mask).sum().item())
@@ -104,6 +114,10 @@ def evaluate(model: Any, loader: Any, criterion: Any, device: str) -> dict[str, 
         "rmse_norm": rmse,
         "mae_norm": sae / max(count, 1),
         "bias_norm": (sum_pred - sum_target) / max(count, 1),
+        # composite objective (same function the optimizer minimizes); the
+        # primary checkpoint-selection criterion
+        "composite_norm": loss_sum / max(count, 1),
+        **{f"{name}_norm": value / max(count, 1) for name, value in term_sums.items()},
         "count": float(count),
     }
 
@@ -154,6 +168,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ffn_dim=args.ffn_dim,
         dropout=args.dropout,
         raw_hidden=args.raw_hidden,
+        pure_attention=args.pure_attention,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     logger.info("model parameters: %d", n_params)
@@ -185,6 +200,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         json.dumps(run_config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     best_val = float("inf")
+    best_val_rmse = float("inf")
     step = 0
     history: list[dict[str, Any]] = []
     for epoch in range(1, args.epochs + 1):
@@ -218,17 +234,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             record.update({f"val_{k}": v for k, v in val_stats.items()})
             val_rmse = val_stats["rmse_norm"] * norm.v_sd
             record["val_rmse_physical"] = val_rmse
-            if val_stats["rmse_norm"] < best_val:
-                best_val = val_stats["rmse_norm"]
+            # primary selection: composite loss = the objective itself; the
+            # RMSE-selected checkpoint is kept alongside for divergence comparison
+            if val_stats["composite_norm"] < best_val:
+                best_val = val_stats["composite_norm"]
                 torch.save({"model": model.state_dict(),
                             "config": run_config,
-                            "epoch": epoch}, run_dir / "best.pt")
+                            "epoch": epoch,
+                            "selected_by": "composite"}, run_dir / "best.pt")
                 record["best"] = True
+            if val_stats["rmse_norm"] < best_val_rmse:
+                best_val_rmse = val_stats["rmse_norm"]
+                torch.save({"model": model.state_dict(),
+                            "config": run_config,
+                            "epoch": epoch,
+                            "selected_by": "rmse"}, run_dir / "best_by_rmse.pt")
+                record["best_by_rmse"] = True
         history.append(record)
         logger.info(
             "epoch %d/%d train_loss=%.4f%s (%.1fs)",
             epoch, args.epochs, train_loss,
             "".join(f" val_rmse={record['val_rmse_physical']:.4f} m/s"
+                    f" val_composite={record['val_composite_norm']:.4f}"
                     if "val_rmse_physical" in record else ""),
             record["seconds"],
         )
@@ -245,7 +272,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     model.load_state_dict(checkpoint["model"])
     if len(test_set):
         test_stats = evaluate(model, test_loader, criterion, device)
-        test_stats = {k: v * (norm.v_sd if k.endswith("_norm") else 1.0)
+        # scale only the physical-unit metrics; the composite and physics
+        # terms stay in normalized units (physics terms don't scale with v_sd)
+        test_stats = {k: (v * norm.v_sd if k in ("rmse_norm", "mae_norm", "bias_norm") else v)
                       for k, v in test_stats.items()}
         logger.info("test: %s", {k: round(v, 4) for k, v in test_stats.items()})
         (run_dir / "test_metrics.json").write_text(
@@ -256,21 +285,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 def _select_split_sections(sections, split: str, seed: int):
     """Sections belonging to one station-level split (no norm leakage)."""
+    from .dataset import split_stations
+
+    station_splits = split_stations(sections, seed=seed)
+    chosen = station_splits[split]
     by_station: dict[str, list] = {}
     for section in sections:
         by_station.setdefault(str(section["station"]), []).append(section)
-    stations = sorted(by_station)
-    rng = random.Random(seed)
-    rng.shuffle(stations)
-    n = len(stations)
-    n_train = max(1, int(round(n * 0.7)))
-    n_val = max(1, int(round(n * 0.15))) if n > 2 else 0
-    if split == "train":
-        chosen = stations[:n_train]
-    elif split == "val":
-        chosen = stations[n_train:n_train + n_val]
-    else:
-        chosen = stations[n_train + n_val:]
     return [s for station in chosen for s in by_station[station]]
 
 

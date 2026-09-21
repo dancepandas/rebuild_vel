@@ -82,33 +82,44 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit("empty evaluation split")
 
     model = RebuildVelocityModel(
-        d_model=config.get("d_model", 256),
-        num_heads=config.get("num_heads", 8),
-        num_layers=config.get("num_layers", 6),
-        ffn_dim=config.get("ffn_dim", 512),
-        dropout=config.get("dropout", 0.1),
+        d_model=config.get("d_model", 768),
+        num_heads=config.get("num_heads", 12),
+        num_layers=config.get("num_layers", 14),
+        ffn_dim=config.get("ffn_dim", 2304),
+        dropout=config.get("dropout", 0.0),
         raw_hidden=config.get("raw_hidden", 64),
+        pure_attention=config.get("pure_attention", False),
     ).to(args.device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
 
     loader = DataLoader(dataset, batch_size=32, shuffle=False, collate_fn=collate_sections)
-    preds: list[np.ndarray] = []
-    targets: list[np.ndarray] = []
+    batch_preds: list[np.ndarray] = []
     with torch.no_grad():
         for batch in loader:
             batch = {key: value.to(args.device) for key, value in batch.items()}
             output = model.forward_batch(batch)
-            preds.append(output["velocity_pred"].cpu().numpy().ravel())
-            targets.append(batch["target"].cpu().numpy().ravel())
-    # per-line padding mask and source metadata, aligned with sample order
-    valid = np.concatenate([sample["line_mask"].astype(bool) for sample in dataset.samples])
-    state = np.concatenate(dataset.line_states)
-    pred_norm = np.concatenate(preds)
-    target_norm = np.concatenate(targets)
-    pred = pred_norm[valid] * norm.v_sd + norm.v_mu
-    target = target_norm[valid] * norm.v_sd + norm.v_mu
-    state = state[valid]
+            batch_preds.append(output["velocity_pred"].cpu().numpy())
+    # slice per sample: batches pad K to the batch max, so the flat arrays
+    # cannot be masked with one concatenated boolean vector
+    pred_chunks: list[np.ndarray] = []
+    target_chunks: list[np.ndarray] = []
+    state_chunks: list[np.ndarray] = []
+    offset = 0
+    for pred in batch_preds:
+        for row, sample, line_state in zip(
+            pred, dataset.samples[offset:offset + len(pred)],
+            dataset.line_states[offset:offset + len(pred)],
+        ):
+            mask = sample["line_mask"].astype(bool)
+            k = int(mask.sum())
+            pred_chunks.append(row[:len(mask)][:k] * norm.v_sd + norm.v_mu)
+            target_chunks.append(np.asarray(sample["target_physical"])[:k])
+            state_chunks.append(line_state[:k])
+        offset += len(pred)
+    pred = np.concatenate(pred_chunks)
+    target = np.concatenate(target_chunks)
+    state = np.concatenate(state_chunks)
 
     metrics: dict[str, Any] = {
         "model_overall": _regression_metrics(pred, target),

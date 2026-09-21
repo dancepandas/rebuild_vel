@@ -17,11 +17,13 @@ import torch.nn.functional as F
 
 @dataclass(frozen=True)
 class LossConfig:
-    lambda_smooth: float = 0.15
-    lambda_depth_corr: float = 0.10
-    lambda_bank: float = 0.08
-    lambda_bank_zero: float = 0.06
-    lambda_grad: float = 0.05
+    # lambdas pinned to the V3 pretraining run (validated on 99,616 sections);
+    # the larger defaults used earlier in this repo were never ablated
+    lambda_smooth: float = 0.05
+    lambda_depth_corr: float = 0.02
+    lambda_bank: float = 0.01
+    lambda_bank_zero: float = 0.02
+    lambda_grad: float = 0.01
     bank_threshold: float = 0.2
     depth_threshold: float = 0.1
     v_bank_limit: float = 0.6

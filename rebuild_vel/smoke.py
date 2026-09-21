@@ -33,6 +33,10 @@ def synthetic_batch(batch: int = 3, k: int = 12, s: int = 10, seed: int = 0):
         rng.normal(0, 1, (batch, k, s)).astype(np.float32))
     raw_seq_valid = torch.from_numpy(
         (rng.random((batch, k, s)) > 0.2).astype(np.float32))
+    raw_seq_dx = torch.from_numpy(
+        rng.normal(0, 0.3, (batch, k, s)).astype(np.float32))
+    raw_seq_t = torch.from_numpy(
+        rng.random((batch, k, s)).astype(np.float32))
     lengths = rng.integers(k // 2, k + 1, batch)
     line_mask = torch.zeros(batch, k)
     for i, length in enumerate(lengths):
@@ -42,7 +46,7 @@ def synthetic_batch(batch: int = 3, k: int = 12, s: int = 10, seed: int = 0):
         rng.random((batch, N_GLOBAL)).astype(np.float32))
     # mimic collate behaviour: padded columns carry zeros, never garbage
     pad2 = (line_mask == 0).unsqueeze(-1)
-    for tensor in (morphology, raw_stats, raw_seq_v):
+    for tensor in (morphology, raw_stats, raw_seq_v, raw_seq_dx, raw_seq_t):
         tensor.masked_fill_(pad2, 0.0)
     target = target * line_mask
     raw_seq_valid = raw_seq_valid * line_mask.unsqueeze(-1)
@@ -51,6 +55,8 @@ def synthetic_batch(batch: int = 3, k: int = 12, s: int = 10, seed: int = 0):
         "raw_stats": raw_stats,
         "raw_seq_v": raw_seq_v,
         "raw_seq_valid": raw_seq_valid,
+        "raw_seq_dx": raw_seq_dx,
+        "raw_seq_t": raw_seq_t,
         "line_mask": line_mask,
         "target": target,
         "target_physical": target.clone(),

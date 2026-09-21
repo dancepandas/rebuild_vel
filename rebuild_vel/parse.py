@@ -139,28 +139,35 @@ def parse_merged_export(payload: bytes) -> ParsedExport:
     # -- final speed lines (the rebuild target) ----------------------------
     if line_rows:
         idx = {name: line_header.index(name) for name in line_header}
+
+        def cell(row: tuple[Any, ...], name: str, fallback: int) -> Any:
+            """Read a column by header name; short rows degrade to empty
+            instead of raising IndexError (some exports drop tail columns)."""
+            i = idx.get(name, fallback)
+            return row[i] if i < len(row) else ""
+
         for row in line_rows:
-            station = str(row[idx.get("站名", 0)] or "").strip()
-            device = str(row[idx.get("设备码", 1)] or "").strip()
-            rec = record(station, device, row[idx.get("测流时间", 2)])
-            coords = str(row[idx.get("测速线坐标", 19)] or "").strip()
+            station = str(cell(row, "站名", 0) or "").strip()
+            device = str(cell(row, "设备码", 1) or "").strip()
+            rec = record(station, device, cell(row, "测流时间", 2))
+            coords = str(cell(row, "测速线坐标", 19) or "").strip()
             coord_parts = [_float(part) for part in coords.split("-")] if coords else []
             rec["lines"].append({
-                "line_num": _float(row[idx.get("测速线序号", 8)], -1.0),
-                "x": _float(row[idx.get("测速线起点距", 9)]),
-                "bed_elevation": _float(row[idx.get("测速线河底高程", 10)]),
-                "area": _float(row[idx.get("测速线面积", 11)]),
-                "depth": _float(row[idx.get("测速线水深", 12)]),
-                "v_surface": _float(row[idx.get("测速线流速", 13)]),
-                "flow": _float(row[idx.get("测速线流量", 14)]),
-                "confidence": _float(row[idx.get("测速线平均置信度", 15)]),
-                "angle": _float(row[idx.get("测速线平均流向夹角", 16)]),
-                "is_algo": _float(row[idx.get("线流速类型1原始值0插值", 17)], 0.0) == 1.0,
-                "version": str(row[idx.get("算法版本", 18)] or "").strip(),
+                "line_num": _float(cell(row, "测速线序号", 8), -1.0),
+                "x": _float(cell(row, "测速线起点距", 9)),
+                "bed_elevation": _float(cell(row, "测速线河底高程", 10)),
+                "area": _float(cell(row, "测速线面积", 11)),
+                "depth": _float(cell(row, "测速线水深", 12)),
+                "v_surface": _float(cell(row, "测速线流速", 13)),
+                "flow": _float(cell(row, "测速线流量", 14)),
+                "confidence": _float(cell(row, "测速线平均置信度", 15)),
+                "angle": _float(cell(row, "测速线平均流向夹角", 16)),
+                "is_algo": _float(cell(row, "线流速类型1原始值0插值", 17), 0.0) == 1.0,
+                "version": str(cell(row, "算法版本", 18) or "").strip(),
                 "coords": coord_parts,
             })
             if not rec["version"]:
-                rec["version"] = str(row[idx.get("算法版本", 18)] or "").strip()
+                rec["version"] = str(cell(row, "算法版本", 18) or "").strip()
 
     def _raw_row(idx: dict[str, int], row: tuple[Any, ...], extra: dict[str, Any]) -> dict[str, Any]:
         return {

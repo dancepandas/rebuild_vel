@@ -6,14 +6,21 @@ Per measurement (one cross-section at one time) a sample carries:
 * ``raw_stats``      [K, F]  aggregated per-line raw-segment statistics
 * ``raw_seq_v``      [K, S]  raw per-segment velocities (standardized)
 * ``raw_seq_valid``  [K, S]  True where a segment exists
+* ``raw_seq_dx``     [K, S]  (raw_x - line_x) / line_gap, NaN where no obs
+* ``raw_seq_t``      [K, S]  t_start normalized to [0, 1] within the section
 * ``global_features``[G]     water level, max depth, width, original-value proportion
 * ``target``         [K]     standardized surface velocity (the rebuild target)
 * ``target_physical``[K]     unstandardized target, for metric reporting
 * ``line_mask``      [K]     padding mask (batching only, carries no semantics)
 
-Line source (algorithm vs interpolated) is deliberately NOT a model input:
-it is an internal artifact of the processing chain and carries no information
-for reconstruction - whatever raw observations exist are the input.
+The shard-level ``raw_aux`` / ``raw_source`` fields stay on the shard; the
+model consumes one shared encoder regardless of source (quality.py already
+resolves one raw table per measurement, STIV taking priority), so the batch
+tensors above carry no source identity.
+
+The S axis is fully dynamic - one section may carry 9 STIV video segments per
+line while the next carries a single optical-flow estimate.  Nothing in this
+module hard-codes S; it is always derived from the shard's own ``raw_valid``.
 """
 
 from __future__ import annotations
@@ -37,6 +44,16 @@ N_RAW_STATS = 11
 
 #: global section features
 N_GLOBAL = 4
+
+#: per-observation optical-flow region channels packed in ``raw_aux``
+#: (must match ``quality.RAW_AUX_KEYS``); kept on the shard but unused by the
+#: model - the single shared raw encoder dispatches on no source id
+N_RAW_AUX = 7
+
+#: which raw table fed this section; recorded per sample for diagnostics and
+#: stratification, but the model no longer dispatches on it
+SOURCE_IDS = {"stiv": 0, "of": 1, "of_traj": 2}
+N_SOURCES = 3
 
 
 @dataclass
@@ -152,10 +169,14 @@ def _line_raw_stats(
     stats[5] = np.median(v)
     stats[6] = np.percentile(v, 25)
     stats[7] = np.percentile(v, 75)
+    # the optical-flow sheets carry no 流向夹角 column, so angle statistics are
+    # taken over the finite entries only; an all-NaN angle block stays zero
     rad = np.deg2rad(a)
-    stats[8] = np.cos(rad).mean()
-    stats[9] = np.sin(rad).mean()
-    stats[10] = np.abs(np.sin(rad)).mean()            # perpendicularity indicator
+    rad = rad[np.isfinite(rad)]
+    if len(rad):
+        stats[8] = np.cos(rad).mean()
+        stats[9] = np.sin(rad).mean()
+        stats[10] = np.abs(np.sin(rad)).mean()        # perpendicularity indicator
     return stats
 
 
@@ -189,6 +210,39 @@ def build_sample(
     raw_seq_v = np.clip(raw_v / norm.v_sd, -norm.raw_v_max, norm.raw_v_max)
     raw_seq_v = np.where(np.isfinite(raw_seq_v), raw_seq_v, 0.0).astype(np.float32)
 
+    # per-observation offset from the owning line, normalized by the local line
+    # gap so the same relative displacement has the same scale on wide and
+    # narrow sections; NaN where there is no observation
+    if "raw_x" in section and section["raw_x"] is not None:
+        raw_x = np.asarray(section["raw_x"], dtype=np.float64)
+        gap = _local_line_gaps(x)
+        dx = np.where(valid, (raw_x - x[:, None]) / gap[:, None], np.nan)
+        raw_seq_dx = np.nan_to_num(dx, nan=0.0).astype(np.float32)
+    else:
+        raw_seq_dx = np.zeros((k, max(s_total, 1)), dtype=np.float32)
+
+    # observation time normalized to [0, 1] within the measurement so the
+    # model can tell an early from a late reading without a positional encoding
+    if "raw_t_start" in section and section["raw_t_start"] is not None:
+        t0 = np.asarray(section["raw_t_start"], dtype=np.float64)
+        finite_t = t0[np.isfinite(t0)]
+        t_lo = float(finite_t.min()) if finite_t.size else 0.0
+        t_hi = float(finite_t.max()) if finite_t.size else 1.0
+        span = t_hi - t_lo if t_hi > t_lo else 1.0
+        t_norm = np.where(valid, (t0 - t_lo) / span, 0.0)
+        raw_seq_t = t_norm.astype(np.float32)
+    else:
+        raw_seq_t = np.zeros((k, max(s_total, 1)), dtype=np.float32)
+
+    raw_seq_aux = (
+        np.nan_to_num(np.asarray(section["raw_aux"], dtype=np.float64), nan=0.0)
+        if "raw_aux" in section and section["raw_aux"] is not None
+        else np.zeros((k, max(s_total, 1), N_RAW_AUX), dtype=np.float32)
+    ).astype(np.float32)
+
+    source_name = str(section.get("raw_source") or "")
+    raw_source_id = SOURCE_IDS.get(source_name, N_SOURCES - 1)
+
     target_physical = np.asarray(section["v_surface"], dtype=np.float32)
     target = ((target_physical - norm.v_mu) / norm.v_sd).astype(np.float32)
 
@@ -196,14 +250,81 @@ def build_sample(
     globals_ = np.where(np.isfinite(globals_), globals_, 0.0).astype(np.float32)
 
     return {
+        "station": str(section.get("station", "")),
+        "device": str(section.get("device", "")),
+        "time": str(section.get("time", "")),
         "morphology": morphology,
         "raw_stats": stats,
         "raw_seq_v": raw_seq_v,
         "raw_seq_valid": valid.astype(np.float32),
+        "raw_seq_dx": raw_seq_dx,
+        "raw_seq_t": raw_seq_t,
+        "raw_seq_aux": raw_seq_aux,
+        "raw_source_id": np.int64(raw_source_id),
         "global_features": globals_,
         "target": target,
         "target_physical": target_physical,
         "line_mask": np.ones(k, dtype=np.float32),
+    }
+
+
+def _local_line_gaps(x: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    """Local line spacing used to normalize per-observation offsets."""
+    k = len(x)
+    if k < 2:
+        return np.ones(k, dtype=np.float64)
+    gaps = np.full(k, float(x[-1] - x[0]) / max(k - 1, 1), dtype=np.float64)
+    inner = np.diff(x)
+    gaps[1:-1] = np.minimum(inner[:-1], inner[1:])
+    gaps[0] = inner[0]
+    gaps[-1] = inner[-1]
+    return np.maximum(gaps, eps)
+
+
+def split_stations(
+    sections: Sequence[dict[str, Any]],
+    seed: int = 42,
+    train_fraction: float = 0.7,
+    val_fraction: float = 0.15,
+    n_strata: int = 10,
+) -> dict[str, list[str]]:
+    """Station-level split stratified by station mean velocity.
+
+    Plain random shuffling of 200+ stations can deal a whole velocity regime
+    into one split (the test set of the first run held twice the fast-line
+    share of train).  Sorting stations by mean target velocity, cutting them
+    into quantile strata and splitting 70/15/15 *within* every stratum keeps
+    each split exposed to slow, mid and fast stations alike, while stations
+    still never cross splits.
+    """
+    by_station: dict[str, list[dict[str, Any]]] = {}
+    for section in sections:
+        by_station.setdefault(str(section["station"]), []).append(section)
+    stats = []
+    for station, secs in by_station.items():
+        v = np.concatenate([np.asarray(s["v_surface"], dtype=np.float64) for s in secs])
+        stats.append((station, float(v.mean())))
+    stats.sort(key=lambda t: t[1])  # ascending station mean velocity
+    n = len(stats)
+    n_strata = max(1, min(n_strata, n))
+    rng = random.Random(seed)
+    assignment: dict[str, str] = {}
+    for si in range(n_strata):
+        lo, hi = si * n // n_strata, (si + 1) * n // n_strata
+        stratum = [t[0] for t in stats[lo:hi]]
+        rng.shuffle(stratum)
+        n_train = max(1, int(round(len(stratum) * train_fraction)))
+        n_val = max(1, int(round(len(stratum) * val_fraction))) if len(stratum) > 2 else 0
+        for j, station in enumerate(stratum):
+            if j < n_train:
+                assignment[station] = "train"
+            elif j < n_train + n_val:
+                assignment[station] = "val"
+            else:
+                assignment[station] = "test"
+    return {
+        name: sorted(st for st, a in assignment.items() if a == name)
+        for name in ("train", "val", "test")
     }
 
 
@@ -220,24 +341,15 @@ class SectionDataset:
         train_fraction: float = 0.7,
         val_fraction: float = 0.15,
     ) -> None:
+        station_splits = split_stations(
+            sections, seed=seed, train_fraction=train_fraction,
+            val_fraction=val_fraction,
+        )
+        chosen = station_splits[split]
+        self.stations = chosen
         by_station: dict[str, list[dict[str, Any]]] = {}
         for section in sections:
             by_station.setdefault(str(section["station"]), []).append(section)
-        stations = sorted(by_station)
-        rng = random.Random(seed)
-        rng.shuffle(stations)
-        n = len(stations)
-        n_train = max(1, int(round(n * train_fraction)))
-        n_val = max(1, int(round(n * val_fraction))) if n > 2 else 0
-        if split == "train":
-            chosen = stations[:n_train]
-        elif split == "val":
-            chosen = stations[n_train:n_train + n_val]
-        elif split == "test":
-            chosen = stations[n_train + n_val:]
-        else:
-            raise ValueError(f"unknown split: {split}")
-        self.stations = chosen
         split_sections = [
             section for station in chosen for section in by_station[station]
         ]
@@ -248,6 +360,9 @@ class SectionDataset:
                      STATE_ALGO, STATE_INTERP).astype(np.int64)
             for section in split_sections
         ]
+        # eval-only metadata: which raw table this section's input came from
+        self.sources = [str(section.get("raw_source") or "") for section in split_sections]
+        self.source_ids = [int(s["raw_source_id"]) for s in self.samples]
         self.norm = norm
 
     def __len__(self) -> int:
@@ -269,6 +384,8 @@ def collate_sections(batch: Sequence[dict[str, np.ndarray]]) -> dict[str, Any]:
     raw_stats = torch.zeros(b, k_max, N_RAW_STATS, dtype=torch.float32)
     raw_seq_v = torch.zeros(b, k_max, s_max, dtype=torch.float32)
     raw_seq_valid = torch.zeros(b, k_max, s_max, dtype=torch.float32)
+    raw_seq_dx = torch.zeros(b, k_max, s_max, dtype=torch.float32)
+    raw_seq_t = torch.zeros(b, k_max, s_max, dtype=torch.float32)
     target = torch.zeros(b, k_max, dtype=torch.float32)
     target_physical = torch.zeros(b, k_max, dtype=torch.float32)
     line_mask = torch.zeros(b, k_max, dtype=torch.float32)
@@ -281,6 +398,8 @@ def collate_sections(batch: Sequence[dict[str, np.ndarray]]) -> dict[str, Any]:
         raw_stats[i, :k] = torch.from_numpy(item["raw_stats"][:k])
         raw_seq_v[i, :k, :s] = torch.from_numpy(item["raw_seq_v"][:k, :s])
         raw_seq_valid[i, :k, :s] = torch.from_numpy(item["raw_seq_valid"][:k, :s])
+        raw_seq_dx[i, :k, :s] = torch.from_numpy(item["raw_seq_dx"][:k, :s])
+        raw_seq_t[i, :k, :s] = torch.from_numpy(item["raw_seq_t"][:k, :s])
         target[i, :k] = torch.from_numpy(item["target"][:k])
         target_physical[i, :k] = torch.from_numpy(item["target_physical"][:k])
         line_mask[i, :k] = 1.0
@@ -291,6 +410,8 @@ def collate_sections(batch: Sequence[dict[str, np.ndarray]]) -> dict[str, Any]:
         "raw_stats": raw_stats,
         "raw_seq_v": raw_seq_v,
         "raw_seq_valid": raw_seq_valid,
+        "raw_seq_dx": raw_seq_dx,
+        "raw_seq_t": raw_seq_t,
         "target": target,
         "target_physical": target_physical,
         "line_mask": line_mask,

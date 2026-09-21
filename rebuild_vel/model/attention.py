@@ -29,7 +29,12 @@ class RMSNorm(nn.Module):
 
 
 class MorphologyBiasedSelfAttention(nn.Module):
-    """Multi-head self-attention with a four-feature point-pair bias."""
+    """Multi-head self-attention with a four-feature point-pair bias.
+
+    ``rope=True`` swaps the morphology bias for rotary position embeddings
+    (the pure-attention baseline): q/k are rotated by their sequence position
+    (section token at 0, line tokens 1..K) and the bias term is skipped.
+    """
 
     def __init__(
         self,
@@ -40,6 +45,7 @@ class MorphologyBiasedSelfAttention(nn.Module):
         beta_d: float = 0.5,
         beta_bank: float = 0.5,
         beta_grad: float = 0.25,
+        rope: bool = False,
     ) -> None:
         super().__init__()
         if d_model % num_heads != 0:
@@ -47,6 +53,7 @@ class MorphologyBiasedSelfAttention(nn.Module):
         self.d_model = d_model
         self.num_heads = num_heads
         self.head_dim = d_model // num_heads
+        self.rope = bool(rope)
         self.beta_x = nn.Parameter(torch.tensor(float(beta_x)))
         self.beta_d = nn.Parameter(torch.tensor(float(beta_d)))
         self.beta_bank = nn.Parameter(torch.tensor(float(beta_bank)))
@@ -56,6 +63,22 @@ class MorphologyBiasedSelfAttention(nn.Module):
         self.v_proj = nn.Linear(d_model, d_model)
         self.out_proj = nn.Linear(d_model, d_model)
         self.attention_dropout = nn.Dropout(dropout)
+        if self.rope:
+            inv_freq = 1.0 / (
+                10000.0 ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32) / self.head_dim)
+            )
+            self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def _apply_rope(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Rotate q/k heads by their absolute positions. tensor: [B, H, L, D]."""
+        length = tensor.shape[2]
+        positions = torch.arange(length, device=tensor.device, dtype=torch.float32)
+        angles = positions[:, None] * self.inv_freq[None, :]          # [L, D/2]
+        cos = angles.cos().to(tensor.dtype)[None, None, :, :]
+        sin = angles.sin().to(tensor.dtype)[None, None, :, :]
+        half = tensor.shape[-1] // 2
+        x1, x2 = tensor[..., :half], tensor[..., half:]
+        return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
 
     def _morphology_bias(self, morphology: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         differences = torch.abs(morphology.unsqueeze(2) - morphology.unsqueeze(1))
@@ -90,8 +113,12 @@ class MorphologyBiasedSelfAttention(nn.Module):
         query = split_heads(self.q_proj(hidden))
         key = split_heads(self.k_proj(hidden))
         value = split_heads(self.v_proj(hidden))
+        if self.rope:
+            query = self._apply_rope(query)
+            key = self._apply_rope(key)
         logits = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        logits = logits + self._morphology_bias(morphology, logits.dtype)
+        if not self.rope:
+            logits = logits + self._morphology_bias(morphology, logits.dtype)
         logits = logits.masked_fill(~token_mask[:, None, None, :], float("-inf"))
         weights = F.softmax(logits, dim=-1)
         weights = self.attention_dropout(weights)
@@ -113,11 +140,13 @@ class EncoderBlock(nn.Module):
         beta_d: float = 0.5,
         beta_bank: float = 0.5,
         beta_grad: float = 0.25,
+        rope: bool = False,
     ) -> None:
         super().__init__()
         self.norm1 = RMSNorm(d_model)
         self.attention = MorphologyBiasedSelfAttention(
             d_model, num_heads, dropout, beta_x, beta_d, beta_bank, beta_grad,
+            rope=rope,
         )
         self.residual_dropout = nn.Dropout(dropout)
         self.norm2 = RMSNorm(d_model)

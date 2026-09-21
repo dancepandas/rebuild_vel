@@ -26,6 +26,7 @@ class RebuildVelocityModel(nn.Module):
         beta_grad: float = 0.25,
         init_std: float = 0.02,
         raw_hidden: int = 64,
+        pure_attention: bool = False,
         encoder: Optional[HydroSectionEncoder] = None,
     ) -> None:
         super().__init__()
@@ -41,6 +42,7 @@ class RebuildVelocityModel(nn.Module):
             beta_grad=beta_grad,
             init_std=init_std,
             raw_hidden=raw_hidden,
+            pure_attention=pure_attention,
         )
         self.reconstruction_head = nn.Linear(d_model, 1)
         nn.init.trunc_normal_(self.reconstruction_head.weight, std=init_std)
@@ -52,12 +54,14 @@ class RebuildVelocityModel(nn.Module):
         raw_stats: torch.Tensor,
         raw_seq_v: torch.Tensor,
         raw_seq_valid: torch.Tensor,
+        raw_seq_dx: torch.Tensor,
+        raw_seq_t: torch.Tensor,
         line_mask: torch.Tensor,
         global_features: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         encoded = self.encoder(
             morphology, raw_stats, raw_seq_v, raw_seq_valid,
-            line_mask, global_features,
+            raw_seq_dx, raw_seq_t, line_mask, global_features,
         )
         velocity_pred = self.reconstruction_head(encoded["point_embeddings"]).squeeze(-1)
         return {"velocity_pred": velocity_pred, **encoded}
@@ -68,6 +72,8 @@ class RebuildVelocityModel(nn.Module):
             raw_stats=batch["raw_stats"],
             raw_seq_v=batch["raw_seq_v"],
             raw_seq_valid=batch["raw_seq_valid"],
+            raw_seq_dx=batch["raw_seq_dx"],
+            raw_seq_t=batch["raw_seq_t"],
             line_mask=batch["line_mask"],
             global_features=batch["global_features"],
         )

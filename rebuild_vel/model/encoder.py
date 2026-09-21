@@ -27,16 +27,22 @@ class HydroSectionEncoder(nn.Module):
         beta_grad: float = 0.25,
         init_std: float = 0.02,
         raw_hidden: int = 64,
+        pure_attention: bool = False,
     ) -> None:
         super().__init__()
         if num_layers < 1:
             raise ValueError("num_layers must be positive")
         self.init_std = float(init_std)
+        # pure_attention: feed zeroed morphology to the attention bias so the
+        # mechanism degenerates to vanilla self-attention (token embeddings
+        # still carry morphology - only the bias pathway is removed)
+        self.pure_attention = bool(pure_attention)
         self.embeddings = SectionEmbeddings(d_model, dropout, raw_hidden=raw_hidden)
         self.layers = nn.ModuleList([
             EncoderBlock(
                 d_model, num_heads, ffn_dim, dropout,
                 beta_x, beta_d, beta_bank, beta_grad,
+                rope=pure_attention,
             )
             for _ in range(num_layers)
         ])
@@ -58,13 +64,17 @@ class HydroSectionEncoder(nn.Module):
         raw_stats: torch.Tensor,
         raw_seq_v: torch.Tensor,
         raw_seq_valid: torch.Tensor,
+        raw_seq_dx: torch.Tensor,
+        raw_seq_t: torch.Tensor,
         line_mask: torch.Tensor,
         global_features: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         line_mask = line_mask.bool()
+        if self.pure_attention:
+            morphology = torch.zeros_like(morphology)
         hidden = self.embeddings(
             morphology, raw_stats, raw_seq_v, raw_seq_valid,
-            line_mask, global_features,
+            raw_seq_dx, raw_seq_t, line_mask, global_features,
         )
         section_mask = torch.ones(
             line_mask.shape[0], 1, dtype=torch.bool, device=line_mask.device,

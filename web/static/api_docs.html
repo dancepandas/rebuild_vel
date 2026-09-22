@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>断面流速重建 · 接口文档</title>
+<style>
+  :root {
+    --ground: #F0F1F5; --surface: #FFFFFF; --surface-2: #F7F7FA; --surface-3: #ECEDF2;
+    --ink: #1D1D1F; --ink-2: #6E6E73; --ink-3: #9A9AA1;
+    --rule: #E3E4E9; --rule-2: #EFEFF4;
+    --water: #3370FF; --water-ink: #245BDB; --water-soft: #EAF0FF;
+    --field: #B07407; --flag: #D70015;
+    --mono: "Cascadia Code", Consolas, "JetBrains Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--ink);
+         font: 400 14px/1.7 "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif; }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 40px 28px 80px; }
+  h1 { font-size: 24px; margin: 0 0 6px; }
+  .sub { color: var(--ink-2); margin: 0 0 32px; }
+  h2 { font-size: 17px; margin: 40px 0 12px; padding-top: 24px; border-top: 1px solid var(--rule); }
+  h3 { font-size: 14.5px; margin: 24px 0 8px; }
+  p { margin: 8px 0; }
+  code { font-family: var(--mono); font-size: 12.5px; background: var(--surface-2);
+         padding: 1px 5px; border-radius: 4px; }
+  pre { background: #1D1D1F; color: #E8E8ED; padding: 16px 18px; border-radius: 10px;
+        overflow-x: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; }
+  pre code { background: none; padding: 0; color: inherit; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--rule-2); vertical-align: top; }
+  th { color: var(--ink-2); font-weight: 600; font-size: 12.5px; }
+  td code { background: none; padding: 0; }
+  .method { display: inline-block; font-family: var(--mono); font-size: 12px; font-weight: 700;
+            background: var(--water); color: #fff; padding: 2px 9px; border-radius: 5px; }
+  .path { font-family: var(--mono); font-size: 14px; }
+  .type { color: var(--ink-3); font-size: 12px; }
+  .req::after { content: " 必填"; color: var(--flag); font-size: 11.5px; }
+  .note { background: var(--water-soft); border-left: 3px solid var(--water);
+          padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 12px 0; font-size: 13.5px; }
+  .note b { color: var(--water-ink); }
+  .warn { background: #FFF4F4; border-left-color: var(--flag); }
+  .warn b { color: var(--flag); }
+  .toc a { color: var(--water-ink); text-decoration: none; margin-right: 18px; font-size: 13.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>断面流速重建 · 对外推理接口</h1>
+<p class="sub">模型：Aether 系列（P / M / Y 三臂） · 服务：<code>http://&lt;主机&gt;:8760</code></p>
+
+<div class="toc">
+  <a href="#endpoint">① 推理接口</a>
+  <a href="#request">② 请求体</a>
+  <a href="#response">③ 响应体</a>
+  <a href="#errors">④ 错误码</a>
+  <a href="#example">⑤ 完整示例</a>
+</div>
+
+<h2 id="endpoint">① 推理接口</h2>
+<p><span class="method">POST</span> &nbsp;<span class="path">/api/reconstruct</span></p>
+<p>提交一个<strong>断面</strong>（各测速线的起点距、水深、标定表面流速，以及原始视频分段的测速观测），
+服务清洗、过阀门后，用所选模型臂重建出<strong>每个测速线的表面流速</strong>。
+同一次请求可以选多个模型臂，结果一并返回，互相对照。</p>
+<p>查询参数 <code>?arms=aether-p,aether-m</code> 可指定模型臂，缺省跑全部可用臂。
+臂的清单见 <code>GET /api/meta</code> 的 <code>arms</code> 字段（含可用性与缺 checkpoint 的原因）。</p>
+
+<h2 id="request">② 请求体（JSON）</h2>
+<pre><code>{
+  "station": "00106",              <span class="type">// 站码，缺省 "external"</span>
+  "station_name": "湖北-仙桃",      <span class="type">// 展示名，可空</span>
+  "device": "00106",               <span class="type">// 设备编码，可空</span>
+  "time": "2026-08-23 16:45:00",   <span class="type">// 测次时间，可空</span>
+  "water_level": 24.83,            <span class="type">// 水位（m）★必填</span>
+
+  "lines": [                       <span class="type">// 测速线数组 ★必填，至少 1 条；按起点距升序，x 不得重复</span>
+    {
+      "x": 10.0,                   <span class="type">// 起点距（m）★</span>
+      "depth": 1.2,                <span class="type">// 水深（m）★；缺 bed_elevation 时由水位-河底反推</span>
+      "bed_elevation": 23.63,      <span class="type">// 河底高程（m），可空</span>
+      "v_surface": 0.85,           <span class="type">// 标定表面流速（m/s）★</span>
+      "confidence": 0.92,          <span class="type">// 算法置信度，可空</span>
+      "angle": 12.5,               <span class="type">// 流向偏角（°），可空</span>
+      "is_algo": true,             <span class="type">// 是否为算法测得线，缺省 true</span>
+      "line_num": 1                <span class="type">// 线号，可空</span>
+    }
+  ],
+
+  "observations": [                <span class="type">// 原始分段观测 ★必填，至少 1 条；喂给模型的真实输入</span>
+    {
+      "x": 10.0,                   <span class="type">// 观测位置（m）★ 按起点距匹配到最近的测速线</span>
+      "v": 0.91,                   <span class="type">// 分段表面流速（m/s）★</span>
+      "confidence": 0.88,          <span class="type">// 可空</span>
+      "angle": 11.0,               <span class="type">// 可空</span>
+      "t_start": 0.0,              <span class="type">// 分段起始（s，相对测次），可空</span>
+      "t_end": 30.0,               <span class="type">// 分段结束（s），可空</span>
+      "segment_id": 0              <span class="type">// 分段号，可空</span>
+    }
+  ]
+}</code></pre>
+
+<div class="note">
+<b>为什么需要两组数据：</b><code>lines</code> 是平台<strong>标定后</strong>的线表（重建的参照基准），
+<code>observations</code> 是仪器原始<strong>视频分段</strong>的测速观测（模型的输入特征）。
+只给线表没有原始观测时接口会拒绝（<code>reason: "no_raw_input"</code>）——没有输入，模型无法推理。
+</div>
+
+<div class="note warn">
+<b>阀门（dry-line valve）：</b>模型对整条断面回归，可能给没有水深的测速线读出非零流速——
+这样的读数不可能存在，不是可以平均掉的误差。所有臂的输出在返回前统一过阀门：
+<strong>水深 ≤ 0 的线，重建流速强制为 0</strong>。每行结果带 <code>valved: true/false</code> 标记，
+调用方也可在 <code>meta.valve_max_depth</code> / <code>meta.n_valved</code> 读到阀门参数与被归零的线数。
+</div>
+
+<h2 id="response">③ 响应体（HTTP 200）</h2>
+<p>同一个结构也是面板画图的载荷，因此字段同时服务人和图表：</p>
+<pre><code>{
+  "source": "external",
+  "station": "00106", "station_name": "湖北-仙桃",
+  "device": "00106", "time": "2026-08-23 16:45:00",
+  "disagreement_threshold": 1.0,   <span class="type">// |模型-标定| 超过此值计入 disagreement</span>
+  "meta": {
+    "water_level": 24.83, "water_width": 42.6, "section_area": 58.9,
+    "aver_depth": 1.38, "max_depth": 2.31,
+    "n_lines": 10, "n_algo": 10, "n_dry": 0, "n_valved": 0,
+    "valve_max_depth": 0.0,
+    "raw_source": "stiv", "n_raw_used": 603
+  },
+  "lines": [                       <span class="type">// 与请求 lines 一一对应（按 x 升序）</span>
+    {
+      "i": 0, "x": 10.0, "depth": 1.2, "bed": 23.63,
+      "target": 0.85,                <span class="type">// 标定表面流速</span>
+      "algo": true, "confidence": 0.92, "angle": 12.5,
+      "valved": false,               <span class="type">// 是否被阀门归零</span>
+      "pred_aether-p": 0.812,        <span class="type">// ← 各臂的重建值（m/s）</span>
+      "pred_aether-m": 0.901,
+      "pred_aether-y": 0.845
+    }
+  ],
+  "metrics": {                     <span class="type">// 各臂相对标定值的整断面指标</span>
+    "aether-p": { "rmse": 0.112, "mae": 0.094, "bias": 0.018, "nse": 0.81,
+                  "max_abs": 0.31, "disagreement": 0,
+                  "zero_lines_pred_positive": 0 }
+  },
+  "observations": [ { "line": 0, "x": 10.0, "v": 0.91, "confidence": 0.88,
+                      "angle": 11.0, "t": 0.0, "segment": 0 } ],
+  "observations_summary": { "n": 603, "median": 0.42, "p05": 0.05, "p95": 1.02 }
+}</code></pre>
+
+<h3>模型臂字段</h3>
+<table>
+  <tr><th>臂</th><th>含义</th><th>说明</th></tr>
+  <tr><td><code>pred_aether-p</code></td><td>Aether-P</td><td>主模型，物理约束（形态偏置注意力 + 五项物理损失）</td></tr>
+  <tr><td><code>pred_aether-m</code></td><td>Aether-M</td><td>纯净版：z-score 目标、纯注意力 + RoPE，无物理先验</td></tr>
+  <tr><td><code>pred_aether-y</code></td><td>Aether-Y</td><td>变换版：Yeo-Johnson 目标变换，低流速优先</td></tr>
+</table>
+<p>某臂 checkpoint 缺失时该字段为 <code>null</code>，其余臂不受影响；三臂全部不可用返回
+<code>503</code>（<code>reason: "arms_unavailable"</code>）。</p>
+
+<h3>metrics 各字段</h3>
+<table>
+  <tr><th>字段</th><th>含义</th></tr>
+  <tr><td><code>rmse</code> / <code>mae</code></td><td>整断面重建误差（m/s）</td></tr>
+  <tr><td><code>bias</code></td><td>平均偏差，正 = 模型整体偏高</td></tr>
+  <tr><td><code>nse</code></td><td>Nash-Sutcliffe 效率；标定值无方差时为 <code>null</code></td></tr>
+  <tr><td><code>max_abs</code></td><td>单线最大绝对误差（m/s）</td></tr>
+  <tr><td><code>disagreement</code></td><td>|模型−标定| &gt; 1.0 m/s 的线数，建议人工复核</td></tr>
+  <tr><td><code>zero_lines_pred_positive</code></td><td>标定为 0 而模型读出 &gt; 0.1 m/s 的线数（含枯水线误判）</td></tr>
+</table>
+
+<h2 id="errors">④ 错误</h2>
+<p>所有错误响应都是 <code>{"error": ..., "reason": ..., "code": ...}</code> 形状；
+<strong><code>reason</code> 是稳定可程序判断的代码</strong>，<code>error</code> 是给人类读的说明。</p>
+<table>
+  <tr><th>HTTP</th><th>reason</th><th>触发条件</th></tr>
+  <tr><td>400</td><td><code>bad_json</code></td><td>请求体不是合法 JSON 或为空</td></tr>
+  <tr><td>422</td><td><code>section_refused</code></td><td>断面未过质量阀门；细节见下表</td></tr>
+  <tr><td>503</td><td><code>arms_unavailable</code></td><td>所选臂的 checkpoint 全部缺失</td></tr>
+  <tr><td>500</td><td>—</td><td>未预期的服务器错误（响应体带 <code>type</code> 名）</td></tr>
+</table>
+
+<h3>section_refused 的细分代码（422 响应里 <code>reason</code> 字段）</h3>
+<table>
+  <tr><th>reason</th><th>含义</th></tr>
+  <tr><td><code>no_raw_input</code></td><td>observations 为空，或没有任何观测落在任一测速线的容差内</td></tr>
+  <tr><td><code>too_few_lines</code></td><td>测速线少于 1 条</td></tr>
+  <tr><td><code>missing_identity</code></td><td>站点 / 设备 / 时间字段缺失</td></tr>
+  <tr><td><code>bad_water_level</code></td><td>水位缺失或非数值</td></tr>
+  <tr><td><code>duplicate_x</code></td><td>测速线起点距未严格递增（有重复）</td></tr>
+  <tr><td><code>bad_depth</code></td><td>水深缺失且河底高程不可得，无法反推</td></tr>
+  <tr><td><code>bad_velocity</code></td><td>标定流速含非数值</td></tr>
+  <tr><td><code>velocity_out_of_range</code></td><td>标定流速超出配置上限（推理模式此项关闭，保留代码）</td></tr>
+  <tr><td><code>mostly_zero</code> / <code>dominant_value</code></td><td>标定值几乎全零 / 几乎全同一值（推理模式关闭，保留代码）</td></tr>
+  <tr><td><code>no_algorithm_lines</code></td><td>没有任何算法测得线（推理模式关闭，保留代码）</td></tr>
+  <tr><td><code>nonfinite</code></td><td>输入含非数值字段</td></tr>
+</table>
+
+<h2 id="example">⑤ 完整示例（curl）</h2>
+<pre><code>curl -X POST "http://127.0.0.1:8760/api/reconstruct?arms=aether-p,aether-m" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "station": "00106",
+    "water_level": 24.83,
+    "lines": [
+      {"x": 10.0, "depth": 1.2,  "v_surface": 0.85},
+      {"x": 14.0, "depth": 1.5,  "v_surface": 1.02},
+      {"x": 18.0, "depth": 1.1,  "v_surface": 0.78},
+      {"x": 22.0, "depth": 0.0,  "v_surface": 0.0},
+      {"x": 26.0, "depth": 1.3,  "v_surface": 0.95}
+    ],
+    "observations": [
+      {"x": 10.0, "v": 0.91, "t_start": 0,   "t_end": 30},
+      {"x": 10.0, "v": 0.87, "t_start": 30,  "t_end": 60},
+      {"x": 14.0, "v": 1.10, "t_start": 0,   "t_end": 30},
+      {"x": 18.0, "v": 0.82, "t_start": 0,   "t_end": 30},
+      {"x": 26.0, "v": 0.99, "t_start": 0,   "t_end": 30}
+    ]
+  }'</code></pre>
+<p>上例中第 4 条线 <code>depth = 0</code>，两条模型臂在该线的预测都会被阀门归零，
+对应行 <code>valved: true</code>、<code>pred_* = 0.0</code>。</p>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,64 @@
+{
+  "物理版": {
+    "obs_line_share": 0.9993756502501236,
+    "raw_target_corr": 0.7223725798077588,
+    "contradiction_up": {
+      "n": 99263,
+      "frac": 0.054445607870734256,
+      "raw_median": 2.2119103280181664,
+      "target_median": 0.20999999344348907
+    },
+    "contradiction_down": {
+      "n": 83521,
+      "frac": 0.04581114428308228
+    },
+    "consistent_lines": 1640375,
+    "station_contradiction_rate": {
+      "median": 0.058987597175241824,
+      "p90": 0.14535137224584457,
+      "max": 0.24626600985221675,
+      "stations_gt_20pct": 2,
+      "n_stations": 37
+    },
+    "model": {
+      "pred_on_up_lines": 0.9300974011421204,
+      "target_on_up_lines": 0.3902837634086609,
+      "raw_on_up_lines": 2.705289605344472,
+      "follow_weight_all": 0.18491435212041918,
+      "follow_weight_up": 0.049744367102755586,
+      "rmse_consistent": 0.27009108662605286,
+      "rmse_contradiction": 0.8164722323417664
+    }
+  },
+  "纯净MSE版": {
+    "obs_line_share": 0.9993756502501236,
+    "raw_target_corr": 0.7223725798077588,
+    "contradiction_up": {
+      "n": 99263,
+      "frac": 0.054445607870734256,
+      "raw_median": 2.2119103280181664,
+      "target_median": 0.20999999344348907
+    },
+    "contradiction_down": {
+      "n": 83521,
+      "frac": 0.04581114428308228
+    },
+    "consistent_lines": 1640375,
+    "station_contradiction_rate": {
+      "median": 0.058987597175241824,
+      "p90": 0.14535137224584457,
+      "max": 0.24626600985221675,
+      "stations_gt_20pct": 2,
+      "n_stations": 37
+    },
+    "model": {
+      "pred_on_up_lines": 0.8857287764549255,
+      "target_on_up_lines": 0.3902837634086609,
+      "raw_on_up_lines": 2.705289605344472,
+      "follow_weight_all": 0.1803522209659753,
+      "follow_weight_up": 0.06896376637853041,
+      "rmse_consistent": 0.24425466358661652,
+      "rmse_contradiction": 0.7945946455001831
+    }
+  }
+}

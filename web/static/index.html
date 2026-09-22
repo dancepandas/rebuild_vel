@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>断面流速重建 · 模型展示</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="rail">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <span class="brand-name">断面流速重建</span>
+  </div>
+
+  <div class="arms" role="radiogroup" aria-label="模型">
+    <span class="arms-label">模型</span>
+    <div class="arms-set" id="arms"></div>
+  </div>
+
+  <div class="rail-right">
+    <button class="layers" id="layers-toggle" type="button" aria-expanded="false">图层</button>
+    <div class="layers-menu" id="layers-menu" hidden>
+      <label><input type="checkbox" id="show-recon" checked><span>模型重建</span></label>
+      <label><input type="checkbox" id="show-target" checked><span>平台标定值</span></label>
+      <label><input type="checkbox" id="show-raw" checked><span>原始测速线观测</span></label>
+      <label><input type="checkbox" id="show-dry" checked><span>枯水线</span></label>
+    </div>
+  </div>
+</header>
+
+<main class="shell">
+
+  <aside class="picker">
+    <section class="picker-block">
+      <div class="picker-head">
+        <h2>站点</h2>
+        <span class="count" id="station-count"></span>
+      </div>
+      <input class="search" id="station-search" type="search" placeholder="站码或站名" autocomplete="off">
+      <ul class="list scroll-well" id="station-list" role="listbox" aria-label="站点"></ul>
+    </section>
+
+    <section class="picker-block picker-block--grow">
+      <div class="picker-head">
+        <h2>测次</h2>
+        <span class="count" id="measurement-count"></span>
+      </div>
+      <div class="picker-src">
+        <button class="src-btn" id="src-live" type="button" aria-pressed="true">实时</button>
+        <button class="src-btn" id="src-cache" type="button" aria-pressed="false">已入库</button>
+        <input class="src-date" id="live-date" type="date" aria-label="实时查询日期">
+      </div>
+      <ul class="list scroll-well" id="measurement-list" role="listbox" aria-label="测次"></ul>
+    </section>
+  </aside>
+
+  <section class="board scroll-well" id="board">
+    <div class="board-empty" id="board-empty">
+      <p class="board-empty-line" id="board-empty-line">左边选一个站点和测次。</p>
+      <p class="board-empty-sub" id="board-empty-sub">面板会画出这个测次的断面，以及模型从原始测速线重建出的流速分布。</p>
+    </div>
+
+    <div class="board-loading" id="board-loading" hidden>
+      <span class="spinner" aria-hidden="true"></span>
+      <span id="loading-text">正在读取测次…</span>
+    </div>
+
+    <div class="board-error" id="board-error" hidden>
+      <h3 id="error-title">读取失败</h3>
+      <p id="error-detail"></p>
+      <button type="button" id="error-retry">重试</button>
+    </div>
+
+    <div class="board-content" id="board-content" hidden>
+
+      <div class="titleblock" id="titleblock">
+        <div class="tb-id">
+          <span class="tb-station" id="tb-station">—</span>
+          <span class="tb-time" id="tb-time">—</span>
+        </div>
+        <dl class="tb-facts" id="tb-facts"></dl>
+      </div>
+
+      <figure class="plot">
+        <figcaption class="plot-caption">
+          <span class="plot-title">断面流速分布</span>
+        </figcaption>
+        <div class="plot-tools">
+          <div class="plot-legend" id="plot-legend"></div>
+          <!-- The count in the badge is what this switch is holding out of the
+               picture, and it is a number rather than a sentence on purpose: it is
+               the only thing on the page that changes what the figure shows, so it
+               has to be visible, and it is the only thing, so it does not get to be
+               a paragraph.  The threshold and the way back are in the tooltip. -->
+          <label class="axis-switch" id="axis-switch">
+            <input type="checkbox" id="limit-axis" checked><span>流速轴上限</span><b class="axis-badge" id="axis-badge" hidden></b></label>
+        </div>
+        <div class="plot-stage" id="plot-stage">
+          <svg id="section-svg" role="img" aria-labelledby="plot-desc"></svg>
+          <div class="tip" id="tip" hidden></div>
+        </div>
+        <div class="plot-scale" id="plot-scale"></div>
+        <div class="plot-strip" id="strip">
+          <svg id="strip-svg" aria-hidden="true"></svg>
+        </div>
+        <div class="strip-key" id="strip-key"></div>
+      </figure>
+
+      <section class="readout" id="readout">
+        <h3 class="readout-head" id="readout-head">这个测次上各模型的表现</h3>
+        <table class="readout-table" id="readout-table"></table>
+      </section>
+
+      <section class="obs" id="obs">
+        <div class="obs-head">
+          <h3>原始测速线观测</h3>
+          <span class="count" id="obs-count"></span>
+        </div>
+        <table class="obs-table" id="obs-table"></table>
+      </section>
+
+    </div>
+  </section>
+</main>
+
+<div class="scrim" id="scrim" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

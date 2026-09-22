@@ -56,4 +56,12 @@ step yj_ckpt_duel tools/compare_models.py --data data/vel --device cuda \
   --checkpoint "$YJ/best_by_rmse.pt:YJ物理RMSE选点" \
   --output "$OUT/yj_ckpt_duel.json"
 
+# the load-bearing test: the transform is not a neutral reparameterisation, it
+# reweights the L2 loss by the Jacobian w(v) = (dy/dx)^2 (62x between v=0 and
+# v=3).  This checks whether that theoretical weight surface is actually
+# visible in the predictions -- i.e. whether YJ over-predicts less exactly
+# where w(v) is large -- rather than merely shifting the overall bias.
+step fingerprint_3way tools/transform_fingerprint.py --data data/vel --device cuda \
+  "${CKPTS[@]}" --output "$OUT/fingerprint.json" --figure "$OUT/figs_yj/fingerprint.png"
+
 echo "[analysis] all done at $(date '+%F %T')" | tee "$OUT/STATUS_DONE.txt"

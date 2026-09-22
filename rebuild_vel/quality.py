@@ -25,6 +25,43 @@ class QualityOptions:
     min_raw_rows: int = 1                # input-side gate: a section with no raw
                                          # observations is unusable as training data
     raw_tolerance: float = 0.0           # metres; <=0 derives it from line spacing
+    require_algorithm_lines: bool = True  # the training corpus keeps only sections
+                                          # the instrument actually measured lines on
+
+    @classmethod
+    def for_inference(cls) -> "QualityOptions":
+        """The gate for showing a measurement, as opposed to training on it.
+
+        The default values above are corpus filters: they decide whether a
+        measurement is a *good training example*, and they throw away most of a
+        real device-day (a section whose lines all read zero at night teaches
+        the model nothing, so it is dropped).  Showing one is a different
+        question - a reviewer looking at a live timestamp wants to see what the
+        model does with that measurement, including the degenerate ones, and
+        answering "rejected" hides the very case they came to look at.
+
+        So this keeps only the checks that are structurally necessary to build
+        a drawable section, and drops every threshold.  Kept: at least one line,
+        identity, a water level, strictly increasing x, a resolvable depth,
+        finite target values, and at least one raw observation - without any of
+        these there is no section to draw, or the model has no input at all.
+        Dropped: min_lines 8, max_target_velocity 5.633, min_nonzero_lines 3,
+        max_zero_fraction 0.85, max_dominant_value_fraction 0.8, and the
+        requirement that the instrument have measured some lines itself.
+
+        The thresholds are disabled with values the comparisons cannot reach,
+        rather than by branching inside clean_measurement - one code path stays
+        one code path, so an inference section and a training section are built
+        by exactly the same code.
+        """
+        return cls(
+            min_lines=1,
+            max_target_velocity=float("inf"),
+            max_zero_fraction=float("inf"),
+            min_nonzero_lines=0,
+            max_dominant_value_fraction=float("inf"),
+            require_algorithm_lines=False,
+        )
 
 #: raw-velocity tables in the procedure workbook, in priority order. Devices
 #: differ in which one they populate; STIV wins when more than one has rows.
@@ -115,7 +152,7 @@ def clean_measurement(
     confidence = np.asarray([_finite_or_nan(item.get("confidence")) for item in order])
     angle = np.asarray([_finite_or_nan(item.get("angle")) for item in order])
     is_algo = np.asarray([bool(item.get("is_algo")) for item in order], dtype=bool)
-    if not is_algo.any():
+    if options.require_algorithm_lines and not is_algo.any():
         raise SectionQualityError("no_algorithm_lines", "section has no algorithm-given lines")
 
     # -- pick the raw source and align its observations to the lines --------

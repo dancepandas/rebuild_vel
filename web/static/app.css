@@ -1,0 +1,851 @@
+/* ==========================================================================
+   断面流速重建 — 模型展示面板
+
+   Colour is a data channel here, not decoration:
+     water  model reconstruction, and the water body itself
+     field  raw STIV / optical-flow observations taken in the river
+     ink    the platform's own manual value — the reference, never the loudest
+     silt   the river bed
+     dry    lines with no water over them
+   Typography carries two voices: 微软雅黑 for the interface, 仿宋 for the
+   instrument register — measured values, axis text, station identity. 仿宋 is
+   what Chinese engineering drawings and water-resource reports are annotated
+   in, so numbers read as readings rather than as UI.
+
+   The interface around the figure is soft — radii, layered grey shadows and
+   translucency — while the figure itself keeps square corners, hairlines and
+   tabular numerals.  That split is deliberate: a rounded, glowing datum would
+   be a datum dressed as a button.  Soft chrome, hard numbers.
+
+   The accent is 飞书蓝, and it is the same blue as the water channel: the
+   colour that paints the reconstruction is the colour the interface reaches
+   for when it needs one, so the accent never becomes a second competing voice.
+   Where that blue lands on *text* it deepens to --water-ink, because #3370FF
+   on white is 4.3:1 - enough for a stroke, not for a sentence.
+   ========================================================================== */
+
+:root {
+  /* surfaces — the iPhone grey system: a grouped background under white cards */
+  --ground:   #F0F1F5;
+  --surface:  #FFFFFF;
+  --surface-2:#F7F7FA;
+  --surface-3:#ECEDF2;
+
+  /* text — label / secondary / tertiary, Apple's own greys */
+  --ink:      #1D1D1F;
+  --ink-2:    #6E6E73;
+  --ink-3:    #9A9AA1;
+  --rule:     #E3E4E9;
+  --rule-2:   #EFEFF4;
+
+  /* accent — 飞书蓝.  water paints; water-ink speaks; water-tint fills a
+     selected row far enough from white to be seen across a desk */
+  --water:      #3370FF;
+  --water-ink:  #245BDB;
+  --water-l:    #B3C7FF;
+  --water-soft: #EAF0FF;
+  --water-tint: #DCE7FF;
+
+  /* data channels that must not be blue, or they would read as the model */
+  --field:    #B07407;
+  --silt:     #8E7F6C;
+  --dry:      #C9C9CF;
+  --flag:     #D70015;
+
+  --ui: "Microsoft YaHei UI", "Microsoft YaHei", -apple-system, "SF Pro Text",
+        "PingFang SC", "Segoe UI", system-ui, sans-serif;
+  --inst: "FangSong", "STFangsong", "仿宋", "SimSun", serif;
+
+  /* 柔光 — shadows are layered and blue-black, never flat black.  Two short
+     throws read as a surface with thickness; a single large blur reads as a
+     sticker. */
+  --sh-1: 0 1px 2px rgba(16, 24, 40, .05), 0 1px 1px rgba(16, 24, 40, .04);
+  --sh-2: 0 1px 2px rgba(16, 24, 40, .04), 0 8px 24px rgba(16, 24, 40, .07);
+  --sh-3: 0 2px 8px rgba(16, 24, 40, .07), 0 16px 40px rgba(16, 24, 40, .16);
+  --sh-sunk: inset 0 1px 2px rgba(16, 24, 40, .05);
+  --ring: 0 0 0 4px rgba(51, 112, 255, .16);
+
+  --r-1: 7px;
+  --r-2: 10px;
+  --r-3: 14px;
+  --r-4: 18px;
+  --r-pill: 999px;
+
+  /* motion — one curve, borrowed from the way iOS settles: fast out, no
+     overshoot.  Durations stay under 240ms so an interaction answers rather
+     than announces itself. */
+  --ease: cubic-bezier(.32, .72, 0, 1);
+  --t-fast: 140ms;
+  --t: 220ms;
+
+  --rail-h: 56px;
+  --picker-w: 280px;
+}
+
+* { box-sizing: border-box; }
+
+/* `hidden` has to beat the display rules components set on themselves - without
+   this the layers menu, the tooltip, the loading row and the live-mode controls
+   all stay visible after they have been hidden */
+[hidden] { display: none !important; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font: 400 13.5px/1.55 var(--ui);
+  -webkit-font-smoothing: antialiased;
+  display: grid;
+  grid-template-rows: var(--rail-h) 1fr;
+  overflow: hidden;
+}
+
+h1, h2, h3 { margin: 0; font-weight: 600; }
+button, input, select { font: inherit; color: inherit; }
+
+/* every control gets the same press: a small give, then back */
+button, .row, .arm, .src-btn, label { -webkit-tap-highlight-color: transparent; }
+button:active:not(:disabled), .row:active:not(:disabled), .arm:active:not(:disabled) {
+  transform: scale(.975);
+}
+
+:focus-visible {
+  outline: 2px solid var(--water);
+  outline-offset: 2px;
+  border-radius: var(--r-1);
+}
+
+/* -- scroll wells -------------------------------------------------------- */
+
+/* The panel has no scrollbars.  They were the one piece of chrome on the page
+   that came from the operating system rather than from this palette - a grey
+   Windows bar and two arrow buttons sitting in the middle of an iPhone-grey
+   layout - so they are gone, and both halves of what they were doing are done
+   in the panel's own voice instead.
+
+   The first half is saying how far down you are, and it is genuinely lost;
+   that is the price of the request.  The second half is saying that there is
+   more, and losing that would be the worse trade by far: a 420px well with
+   twenty-nine hundred rows in it, or a picker pane holding 221 stations,
+   looks exactly like a well with nothing below the fold unless something says
+   otherwise.  So each well grows a soft shadow on whichever edge has content
+   beyond it, painted in the panel's own shadow colour, arriving and leaving on
+   the same curve as everything else, and never drawn on an edge with nothing
+   behind it.
+
+   The `sticky` pseudo-element is what makes this work over opaque children.
+   An inset box-shadow or a background layer would be painted *behind* the
+   cards, which is to say never seen on the board; a sticky box is part of the
+   content, so it floats over them, and `position: sticky` holds it at the
+   scrollport edge while `top: 0` / `bottom: 0` say which one.
+
+   `scrollbar-width` and `::-webkit-scrollbar` are the two spellings that
+   between them cover every engine the panel is served to.  Neither touches
+   `overflow`, so the wells still scroll by wheel, trackpad, touch and
+   keyboard - and Chromium makes a scroll container keyboard-focusable on its
+   own, so arrow keys reach them without a tabindex. */
+.scroll-well {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scroll-well::-webkit-scrollbar { width: 0; height: 0; }
+
+.scroll-well::before,
+.scroll-well::after {
+  content: "";
+  position: sticky;
+  display: block;
+  height: 15px;
+  z-index: 3;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--t) var(--ease);
+}
+.scroll-well::before {
+  top: 0;
+  margin-bottom: -15px;
+  background: linear-gradient(to bottom, rgba(16, 24, 40, .11), rgba(16, 24, 40, 0));
+}
+.scroll-well::after {
+  bottom: 0;
+  margin-top: -15px;
+  background: linear-gradient(to top, rgba(16, 24, 40, .11), rgba(16, 24, 40, 0));
+}
+.scroll-well.is-top::before,
+.scroll-well.is-end::after { opacity: 1; }
+
+/* The observation well already carries a header pinned to its own top edge, so
+   a shadow there would be painted behind that header and never seen.  Its
+   scroll position is legible from the header; its bottom is not. */
+.obs-scroll::before { display: none; }
+
+/* -- top rail ------------------------------------------------------------ */
+
+.rail {
+  display: flex;
+  align-items: center;
+  gap: 26px;
+  padding: 0 18px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--rule);
+  position: relative;
+  z-index: 20;
+}
+
+.brand { display: flex; align-items: center; gap: 9px; }
+
+.brand-mark {
+  width: 16px; height: 16px;
+  background: var(--water);
+  /* a section profile in miniature: deep in the middle, banks at the edges */
+  clip-path: polygon(0 0, 0 46%, 22% 62%, 50% 100%, 78% 62%, 100% 46%, 100% 0);
+  filter: drop-shadow(0 2px 5px rgba(51, 112, 255, .38));
+}
+
+.brand-name { font-weight: 600; letter-spacing: .04em; }
+
+.arms { display: flex; align-items: center; gap: 12px; }
+
+.arms-label { color: var(--ink-3); font-size: 12px; }
+
+/* The model names: a name row, not a switch.  Pills read as free-standing
+   buttons, and three same-shaped buttons between the brand and the layers
+   button made a row of four buttons — nothing on it owned the page.  Names
+   side by side, the active one wearing only a water stroke, say what this is:
+   three things the page can be, one of them on.  The underline that came before
+   sat on the text's own baseline and tied itself into the letterforms. */
+.arms-set {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.arm {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0 2px 1px;
+  border-radius: var(--r-1);
+  cursor: pointer;
+  color: var(--ink-2);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.5;
+  transition: color var(--t) var(--ease), transform var(--t-fast) var(--ease);
+}
+
+.arm:hover { color: var(--ink); }
+
+/* The active arm's name carries a stroke in the water colour - nothing more.
+   A switch between models is chrome, and chrome never drinks the accent: the
+   accent is the reconstruction itself.  The earlier sunk track plus white
+   thumb painted all three names as one blob and wedged a second chip between
+   the brand and the layers button; a bare underline tied itself into the
+   letterforms; a hairline ring around the text box is the one marker that
+   reads as selection at a glance and as nothing else. */
+.arm.is-active {
+  color: var(--water-ink);
+  outline: 1.5px solid var(--water);
+  outline-offset: 3px;
+}
+.arm.is-active:hover { color: var(--water-ink); }
+
+.arm-name { font-size: 13px; font-weight: 600; }
+/* There is no `.arm-note`.  Each pill carried a second line - 物理约束, 纯净版,
+   Yeo-Johnson - and the same sentence sat under the same name again in the readout
+   table.  The pill is now one line per model, which is what a switch between three
+   things should be: three names, one of them lit.  The expansion moved to the
+   pill's `title`, where it is one hover away and costs the rail no height. */
+.arm[disabled] { opacity: .38; cursor: not-allowed; }
+.arm[disabled]:active { transform: none; }
+
+.rail-right { margin-left: auto; display: flex; align-items: center; gap: 12px; position: relative; }
+
+.layers {
+  appearance: none;
+  background: var(--surface-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-pill);
+  padding: 5px 15px 4px;
+  cursor: pointer;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  transition: border-color var(--t) var(--ease), color var(--t) var(--ease),
+              background var(--t) var(--ease), transform var(--t-fast) var(--ease);
+}
+.layers:hover { border-color: var(--water); color: var(--water-ink); background: var(--surface); }
+.layers[aria-expanded="true"] {
+  border-color: var(--water); color: var(--water-ink);
+  background: var(--surface); box-shadow: var(--ring);
+}
+
+/* translucency where it earns its keep: this panel floats over the figure, and
+   letting the figure read faintly through the edge keeps it attached to what it
+   is filtering rather than hovering at an unrelated depth */
+.layers-menu {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  background: rgba(255, 255, 255, .84);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid rgba(16, 24, 40, .07);
+  border-radius: var(--r-3);
+  padding: 7px 6px;
+  display: grid;
+  gap: 1px;
+  min-width: 182px;
+  box-shadow: var(--sh-3);
+  transform-origin: top right;
+  animation: menu-in var(--t) var(--ease) both;
+}
+@keyframes menu-in {
+  from { opacity: 0; transform: scale(.94) translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+.layers-menu label {
+  display: flex; align-items: center; gap: 9px;
+  font-size: 12.5px; cursor: pointer;
+  padding: 6px 9px;
+  border-radius: var(--r-1);
+  transition: background var(--t-fast) var(--ease);
+}
+.layers-menu label:hover { background: rgba(51, 112, 255, .09); }
+.layers-menu input { accent-color: var(--water); }
+
+/* -- shell --------------------------------------------------------------- */
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--picker-w) 1fr;
+  min-height: 0;
+}
+
+/* -- picker -------------------------------------------------------------- */
+
+.picker {
+  background: var(--surface);
+  border-right: 1px solid var(--rule);
+  display: grid;
+  grid-template-rows: minmax(0, 46%) minmax(0, 54%);
+  min-height: 0;
+}
+
+.picker-block {
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  min-height: 0;
+  padding: 13px 12px 0;
+}
+.picker-block--grow { border-top: 1px solid var(--rule-2); }
+
+.picker-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.picker-head h2 { font-size: 12.5px; letter-spacing: .06em; }
+.count { font: 400 11.5px/1 var(--inst); color: var(--ink-3); }
+
+/* The same records come either out of the local store or straight off the
+   platform, and which one you are looking at changes what the numbers mean -
+   a stored measurement has already been through the pipeline, a live one has
+   not. So the source is a visible switch, not a hidden default.
+
+   实时 stands first and is the default, because it is the only one of the two
+   that can show today: the stored corpus ends 2026-08-31, three weeks before
+   this panel went up. A history view is not what a panel on a wall is for. */
+.picker-src {
+  display: flex; align-items: center; gap: 5px;
+  margin-bottom: 8px;
+  padding: 3px;
+  background: var(--surface-3);
+  border-radius: var(--r-pill);
+  box-shadow: var(--sh-sunk);
+}
+.src-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  border-radius: var(--r-pill);
+  padding: 4px 12px 3px;
+  cursor: pointer;
+  color: var(--ink-2);
+  font-size: 12px;
+  flex: 0 0 auto;
+  transition: background var(--t) var(--ease), color var(--t) var(--ease),
+              box-shadow var(--t) var(--ease), transform var(--t-fast) var(--ease);
+}
+.src-btn:hover { color: var(--ink); }
+.src-btn[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--water-ink);
+  font-weight: 600;
+  box-shadow: var(--sh-1);
+}
+.src-date {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  padding: 3px 9px 2px;
+  font: 400 12px/1.4 var(--inst);
+  transition: border-color var(--t) var(--ease), box-shadow var(--t) var(--ease);
+}
+.src-date:focus { border-color: var(--water); box-shadow: var(--ring); outline: none; }
+
+.search {
+  width: 100%;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+  padding: 6px 11px;
+  margin-bottom: 8px;
+  transition: border-color var(--t) var(--ease), background var(--t) var(--ease),
+              box-shadow var(--t) var(--ease);
+}
+.search::placeholder { color: var(--ink-3); }
+.search:focus {
+  background: var(--surface);
+  border-color: var(--water);
+  box-shadow: var(--ring);
+  outline: none;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0 5px 12px;
+  overflow-y: auto;
+  min-height: 0;
+  display: grid;
+  gap: 1px;
+  align-content: start;
+}
+
+.row {
+  appearance: none;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 6px 9px 5px;
+  cursor: pointer;
+  border-radius: var(--r-2);
+  display: grid;
+  gap: 1px;
+  transition: background var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+.row:hover { background: var(--surface-2); }
+/* the selection is a filled row, not an edge marker: a left rule at this size
+   reads as a table border, and the radius would cut through it anyway */
+.row[aria-selected="true"] { background: var(--water-tint); }
+.row[aria-selected="true"]:hover { background: var(--water-tint); }
+.row:disabled { opacity: .45; cursor: default; }
+.row:disabled:active { transform: none; }
+
+.row-main { display: flex; align-items: baseline; gap: 7px; }
+.row-code { font: 600 12.5px/1.2 var(--inst); letter-spacing: .03em; }
+.row-name { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-meta { font: 400 11px/1.3 var(--inst); color: var(--ink-3); display: flex; gap: 10px; }
+.row[aria-selected="true"] .row-name { color: var(--ink); }
+.row[aria-selected="true"] .row-code { color: var(--water-ink); }
+
+.row--time .row-code { font-size: 12px; letter-spacing: 0; }
+.row--time .m-flow { color: var(--water-ink); }
+.row--time .m-still { color: var(--ink-3); }
+/* a live timestamp the platform would not give up - a defect, not a low flow,
+   so it must not wear the same quiet grey as "this water is barely moving" */
+.row--time .m-none { color: var(--flag); }
+
+.list-empty { padding: 12px 9px; color: var(--ink-3); font-size: 12px; }
+
+.more {
+  width: 100%;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-2);
+  background: var(--surface);
+  padding: 7px;
+  color: var(--water-ink);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color var(--t) var(--ease), background var(--t) var(--ease),
+              transform var(--t-fast) var(--ease);
+}
+.more:hover { border-color: var(--water); background: var(--water-soft); }
+
+/* -- board --------------------------------------------------------------- */
+
+.board {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 26px 44px;
+  position: relative;
+}
+
+.board-empty, .board-error, .board-loading {
+  max-width: 46ch;
+  margin: 14vh auto 0;
+  color: var(--ink-2);
+}
+.board-empty { text-align: center; }
+.board-empty-line { margin: 0 0 6px; font-size: 15px; color: var(--ink); }
+.board-empty-sub { margin: 0; font-size: 13px; line-height: 1.7; }
+
+.board-loading { display: flex; align-items: center; gap: 10px; justify-content: center; }
+.spinner {
+  width: 14px; height: 14px;
+  border: 2px solid var(--rule);
+  border-top-color: var(--water);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.board-error h3 { font-size: 14px; color: var(--flag); margin-bottom: 6px; }
+.board-error p { margin: 0 0 12px; font-size: 13px; word-break: break-word; }
+.board-error button {
+  border: 1px solid var(--rule);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  padding: 6px 16px 5px;
+  cursor: pointer;
+  box-shadow: var(--sh-1);
+  transition: border-color var(--t) var(--ease), color var(--t) var(--ease);
+}
+.board-error button:hover { border-color: var(--water); color: var(--water-ink); }
+
+.board-content { max-width: 1280px; }
+
+/* -- title block --------------------------------------------------------- */
+
+/* The one element that does not become a card.  It is the drawing's title
+   block, and the full-weight ink rule under it is the strongest line on the
+   page - which is what keeps a soft layout from reading as a stack of
+   interchangeable panels. */
+.titleblock {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 30px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--ink);
+  margin-bottom: 22px;
+}
+
+.tb-id { display: flex; align-items: baseline; gap: 12px; }
+.tb-station { font: 600 21px/1 var(--inst); letter-spacing: .03em; }
+.tb-time { font: 400 15px/1 var(--inst); color: var(--ink-2); }
+
+.tb-facts {
+  margin: 0 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 22px;
+}
+.tb-facts > div { display: grid; gap: 1px; }
+.tb-facts dt { font-size: 10.5px; color: var(--ink-3); letter-spacing: .04em; }
+.tb-facts dd { margin: 0; font: 400 13.5px/1.2 var(--inst); font-variant-numeric: tabular-nums; }
+
+/* -- plot ---------------------------------------------------------------- */
+
+.plot { margin: 0; }
+
+.plot-caption {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.plot-title { font-size: 13px; font-weight: 600; letter-spacing: .04em; }
+
+/* There is no `.plot-note`.  A paragraph used to sit opposite the title listing
+   how many measuring lines the section has, how many of them algorithm lines
+   against interpolated ones, how many the valve had zeroed, how many readings the
+   axis ceiling was holding back.  Three of those four were the figure describing
+   itself - the marks are in the drawing and can be counted in the strip - and the
+   fourth was a reading kept out of the picture, which is a fact about the switch
+   that keeps it out and not about the figure.  The panel now follows one rule: the
+   figure states numbers, and a sentence has to earn a place on the page or live in
+   a `title`.  The one number that qualifies is on the switch; see `.axis-badge`. */
+
+.plot-legend { display: flex; flex-wrap: wrap; gap: 7px 18px; margin-bottom: 8px; }
+.plot-legend > span { display: inline-flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--ink-2); }
+.plot-legend i { width: 16px; height: 0; border-top-width: 2px; border-top-style: solid; display: inline-block; border-radius: 2px; }
+.plot-legend i.swatch { height: 9px; width: 9px; border: 0; border-radius: 50%; }
+.plot-legend i.dash { border-top-style: dashed; }
+.plot-legend i.hatch {
+  height: 9px; width: 16px; border: 0;
+  border-radius: 2px;
+  background: repeating-linear-gradient(90deg, var(--dry) 0 3px, transparent 3px 6px);
+}
+/* the measuring lines drawn into the section: a hairline under a filled one */
+.plot-legend i.hair { border-top-width: 1px; opacity: .55; border-radius: 0; }
+
+/* The axis switch shares the legend's row: that is the row naming what the
+   figure is showing, and this decides how much of the velocity axis is shown, so
+   it belongs where the reader is already looking.  It is a control, so it wears
+   a control's border rather than the legend's quiet type - and it sits outside
+   #plot-legend because that element is emptied and rebuilt on every draw. */
+.plot-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; margin-bottom: 10px; }
+.plot-tools .plot-legend { margin-bottom: 0; flex: 1 1 auto; }
+
+.axis-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  color: var(--ink-2);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-pill);
+  padding: 4px 12px 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+  box-shadow: var(--sh-1);
+  transition: border-color var(--t) var(--ease), color var(--t) var(--ease),
+              background var(--t) var(--ease), box-shadow var(--t) var(--ease);
+}
+.axis-switch:hover { border-color: var(--water); color: var(--ink); }
+/* lit while it is doing something: an axis the reader has shortened should say
+   so by itself, and not only through a sentence somewhere else on the page */
+.axis-switch:has(input:checked) {
+  border-color: var(--water);
+  color: var(--water-ink);
+  background: var(--water-soft);
+  box-shadow: 0 0 0 3px rgba(51, 112, 255, .10);
+}
+.axis-switch input { accent-color: var(--water); margin: 0; }
+
+/* How many readings this switch is holding out of the picture.  It is the only
+   place the panel still volunteers a number about itself, and it earns that place
+   because it is the only control on the page that changes what the figure shows:
+   a reader looking at the drawing and wondering "is this all of it?" is already
+   standing on this switch.  A count, not a sentence - the threshold it is measured
+   against and the way to see them are in the switch's own tooltip.  Hidden at
+   zero, so an unrestricted axis wears nothing at all.
+
+   It is set as a quiet step *inside* the pill rather than as a filled badge: the
+   switch is already tinted and already lit, and a solid chip dropped into a tinted
+   capsule reads as a button inside a button - which is the same mistake as drawing
+   a datum with a shadow.  The count is information, so it is set as type. */
+.axis-badge {
+  font: 600 10.5px/1 var(--inst);
+  font-variant-numeric: tabular-nums;
+  color: var(--water-ink);
+  background: var(--water-tint);
+  border-radius: var(--r-pill);
+  padding: 2.5px 6px 2px;
+  min-width: 17px;
+  text-align: center;
+}
+.axis-badge[hidden] { display: none; }
+
+/* the figure is the page's one elevated surface: it is what the panel exists
+   to show, so it is the only thing that gets a lift this size.
+   The padding is vertical only, and deliberately so: the chart is drawn at
+   `stage.clientWidth` and lands inside this box, so any horizontal padding here
+   would be measured into that width and the drawing would overflow by exactly
+   the amount meant to give it room.  The SVG is its own inset - it carries
+   padL/padR of its own - so the card needs no side padding to begin with. */
+.plot-stage {
+  position: relative;
+  background: var(--surface);
+  border-radius: var(--r-4);
+  box-shadow: var(--sh-2);
+  padding: 7px 0 3px;
+}
+#section-svg { display: block; width: 100%; height: auto; }
+
+.tip {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(29, 29, 31, .82);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  color: #fff;
+  padding: 9px 12px 10px;
+  border-radius: var(--r-2);
+  font: 400 11.5px/1.5 var(--inst);
+  font-variant-numeric: tabular-nums;
+  min-width: 150px;
+  z-index: 5;
+  box-shadow: var(--sh-3);
+  animation: tip-in var(--t-fast) var(--ease) both;
+}
+@keyframes tip-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+.tip b { display: block; font-family: var(--ui); font-size: 11px; font-weight: 600; letter-spacing: .04em; margin-bottom: 3px; }
+.tip span { display: flex; justify-content: space-between; gap: 14px; }
+.tip em { font-style: normal; opacity: .68; }
+.tip .is-flag { color: #FFC46B; }
+
+.plot-scale {
+  display: flex;
+  justify-content: space-between;
+  font: 400 11px/1.6 var(--inst);
+  color: var(--ink-3);
+  padding: 5px 2px 0;
+}
+
+.plot-strip {
+  margin-top: 12px;
+  background: var(--surface);
+  border-radius: var(--r-3);
+  box-shadow: var(--sh-1);
+  padding: 9px 0 5px;   /* vertical only, for the same reason as .plot-stage */
+}
+#strip-svg { display: block; width: 100%; height: auto; }
+
+.strip-key { display: flex; flex-wrap: wrap; gap: 5px 18px; margin-top: 8px; font-size: 11.5px; color: var(--ink-2); }
+.strip-key > span { display: inline-flex; align-items: center; gap: 6px; cursor: help; }
+.strip-key i { width: 9px; height: 9px; display: inline-block; border-radius: 2px; }
+.strip-key i.hollow { border: 1.5px solid var(--ink-3); background: transparent; }
+
+/* -- readout table ------------------------------------------------------- */
+
+.readout { margin-top: 32px; }
+/* The caveats that used to sit under the table live in this heading's tooltip, so
+   the heading has to look askable - a heading with a `title` and no affordance is
+   a caveat nobody reads, which is the same as not writing it.  The help cursor is
+   that affordance and costs no words.  It is set unconditionally rather than only
+   when a tooltip exists: the stylesheet cannot see the title, and a rule that
+   guessed would be a rule that lies on the live channel, where the heading carries
+   nothing. */
+.readout-head { font-size: 13px; letter-spacing: .04em; margin-bottom: 10px; cursor: help; }
+
+.readout-table { border-collapse: collapse; width: 100%; max-width: 860px; }
+.readout-table th, .readout-table td {
+  text-align: right;
+  padding: 8px 12px 7px;
+  border-bottom: 1px solid var(--rule-2);
+  font-variant-numeric: tabular-nums;
+  transition: background var(--t-fast) var(--ease);
+}
+.readout-table th:first-child, .readout-table td:first-child {
+  text-align: left;
+  font-family: var(--ui);
+  padding-left: 10px;
+}
+.readout-table thead th {
+  font: 400 11px/1.3 var(--ui);
+  color: var(--ink-3);
+  border-bottom-color: var(--rule);
+  white-space: nowrap;
+}
+.readout-table tbody tr:first-child td:first-child { border-top-left-radius: var(--r-2); }
+.readout-table tbody tr:hover td { background: var(--surface-2); }
+.readout-table tbody td { font-family: var(--inst); font-size: 13.5px; }
+.readout-table tr.is-active td { background: var(--water-soft); }
+.readout-table tr.is-active:hover td { background: var(--water-soft); }
+.readout-table tr.is-active td:first-child { font-weight: 600; }
+.readout-table td.best { color: var(--water-ink); font-weight: 600; }
+.readout-table td.bad { color: var(--flag); }
+/* No `.row-note` either: the model's description used to be a second line under
+   its name in the first column, which made every row of the table two lines tall
+   to repeat what the pill now keeps in its tooltip.  One line per model here as
+   well, which is also what makes the table scannable as a comparison. */
+
+/* There is no `.readout-note`.  Three sentences stood here - what the metrics were
+   computed on, what the platform's value is worth as a reference, what the valve
+   did to the absolute numbers - and read as one grey block they were skipped, which
+   is the worst outcome a caveat can have.  The heading above the table now carries
+   them in its `title`: one hover when a reader wants them, nothing when they do
+   not.  See `.readout-head`. */
+
+/* -- observations -------------------------------------------------------- */
+
+.obs { margin-top: 36px; }
+.obs-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
+.obs-head h3 { font-size: 13px; letter-spacing: .04em; }
+
+.obs-table { border-collapse: collapse; width: 100%; }
+.obs-table th, .obs-table td {
+  text-align: right;
+  padding: 6px 12px 5px;
+  border-bottom: 1px solid var(--rule-2);
+  font-family: var(--inst);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.obs-table thead th {
+  font: 400 11px/1.3 var(--ui);
+  color: var(--ink-3);
+  border-bottom-color: var(--rule);
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+}
+.obs-table th:first-child, .obs-table td:first-child { text-align: left; padding-left: 10px; }
+.obs-table tbody tr { transition: background var(--t-fast) var(--ease); }
+.obs-table tbody tr:hover td { background: var(--surface-2); }
+.obs-table tr.is-flagged td { background: rgba(215, 0, 21, .05); }
+.obs-table tr.is-flagged:hover td { background: rgba(215, 0, 21, .08); }
+.obs-table td.dim { color: var(--ink-3); }
+.obs-scroll {
+  max-height: 420px;
+  overflow-y: auto;
+  border-radius: var(--r-3);
+  background: var(--surface);
+  box-shadow: var(--sh-1);
+}
+
+/* -- svg text ------------------------------------------------------------ */
+
+#section-svg text, #strip-svg text {
+  font-family: var(--inst);
+  font-variant-numeric: tabular-nums;
+}
+
+/* There is no `.obs-caption` either.  `caption-side: bottom` never applied - the
+   caption was a sibling of the table, not a child - so it always rendered as a
+   plain line of grey text under the scroll well, which is where a fragment about
+   the table's own grouping read as debris.  How the rows are grouped is in the
+   first column, on every row, and is the table's accessible name now. */
+
+.obs-table td.bad { color: var(--flag); }
+
+/* -- motion -------------------------------------------------------------- */
+
+/* the one orchestrated moment: a new measurement rises into place.  It runs
+   once per draw, not per element - a stagger on every card is the tell of a
+   generated page, and there is nothing here that is a sequence. */
+.draw-in { animation: draw-in .42s var(--ease) both; }
+@keyframes draw-in {
+  from { opacity: 0; transform: translateY(7px) scale(.995); }
+  to   { opacity: 1; transform: none; }
+}
+
+.scrim { position: fixed; inset: 0; z-index: 10; }
+
+@media (prefers-reduced-motion: reduce) {
+  .draw-in, .layers-menu, .tip { animation: none; }
+  .spinner { animation-duration: 2s; }
+  button:active, .row:active, .arm:active { transform: none; }
+  * { transition-duration: 1ms !important; }
+}
+
+/* -- narrow -------------------------------------------------------------- */
+
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; grid-template-rows: 232px 1fr; }
+  .picker { grid-template-rows: 1fr; grid-template-columns: 1fr 1fr; border-right: 0; border-bottom: 1px solid var(--rule); }
+  .picker-block--grow { border-top: 0; border-left: 1px solid var(--rule-2); }
+  .board { padding: 16px 14px 34px; }
+  .tb-facts { margin-left: 0; }
+  .rail { gap: 12px; padding: 0 12px; }
+  .brand-name, .arms-label { display: none; }
+  .arms-set { gap: 14px; }
+  .board-content { max-width: none; }
+  .obs-table th:nth-child(4), .obs-table td:nth-child(4),
+  .obs-table th:nth-child(5), .obs-table td:nth-child(5) { display: none; }
+}

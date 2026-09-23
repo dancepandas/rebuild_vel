@@ -45,6 +45,13 @@ const state = {
   axisLimit: true,
   pinned: null,
   loading: false,
+  // navigation generation.  Every reader gesture that starts a new navigation
+  // (station click, measurement click, channel switch, day change) bumps this;
+  // anything already in flight - above all the boot walk in openLatestLive,
+  // whose per-candidate exports run tens of seconds - stamps it at entry and
+  // bails the moment it no longer matches, instead of resolving late and
+  // drawing over whatever the reader has moved on to
+  navSeq: 0,
   // time -> {ok, why} for live timestamps already opened: the platform list is
   // timestamp-only, so this is the only place a live day's pullability is known
   liveTried: new Map(),
@@ -199,7 +206,7 @@ function renderStations() {
     if (station.devices.length > 1) meta.append(spanText(`${station.devices.length} 设备`));
 
     button.append(main, meta);
-    button.addEventListener("click", () => selectStation(station));
+    button.addEventListener("click", () => { state.navSeq += 1; selectStation(station); });
     li.append(button);
     host.append(li);
   }
@@ -267,7 +274,9 @@ function renderMeasurements() {
     }
 
     button.append(main, meta);
-    button.addEventListener("click", () => selectMeasurement(row));
+    // the bump marks every in-flight navigation (the boot walk above all)
+    // as superseded, so its late resolutions cannot draw over this click
+    button.addEventListener("click", () => { state.navSeq += 1; selectMeasurement(row); });
     li.append(button);
     host.append(li);
   }
@@ -363,6 +372,7 @@ async function selectStation(station, preferredDevice = null) {
 
 async function loadMeasurements({ autoPick = false } = {}) {
   if (!state.station || !state.device) return;
+  const seq = state.navSeq;   // a newer navigation supersedes this load
   const live = state.source === "live";
   // a new station, device, day or source is a new list: the old verdicts are
   // about timestamps that are no longer on screen, and the list folds back to
@@ -383,6 +393,10 @@ async function loadMeasurements({ autoPick = false } = {}) {
           device: state.device,
           limit: 500,
         });
+    // superseded while we were asking (a reader click during the boot walk):
+    // the newer navigation owns the panel, and touching anything here would
+    // overwrite its list - leave without a trace
+    if (seq !== state.navSeq) return;
     state.measurements = data.measurements || [];
     // settle the busy flag before drawing the rows, never after: a row drawn
     // while the board is busy is drawn `disabled`, and nothing rebuilds it when
@@ -409,6 +423,7 @@ async function loadMeasurements({ autoPick = false } = {}) {
       showEmpty();
     }
   } catch (error) {
+    if (seq !== state.navSeq) return;
     setBusy(false);
     showError(live ? "平台上的测次读不到" : "读不到测次列表", error.message);
   }
@@ -430,6 +445,7 @@ function pickTypical(rows) {
 
 async function selectMeasurement(row) {
   if (!state.station || !state.device) return false;
+  const seq = state.navSeq;   // superseded mid-pull: draw nothing, touch nothing
   const live = state.source === "live";
   state.time = row.time;
   setBusy(true, live ? "正在从平台拉取这个测次…" : "正在重建流速分布…");
@@ -446,6 +462,10 @@ async function selectMeasurement(row) {
       arms: state.arms.filter((a) => a.available).map((a) => a.id).join(","),
       source: live ? "live" : "cache",
     });
+    // the reader navigated elsewhere while this pull was in flight (the boot
+    // walk lands here): their newer view owns the board, and settling this
+    // one would paint a section about a station they have already left
+    if (seq !== state.navSeq) return false;
     if (live) state.liveTried.set(row.time, { ok: true, why: "" });
     state.payload = payload;
     state.pinned = null;
@@ -458,6 +478,7 @@ async function selectMeasurement(row) {
     renderMeasurements();
     return true;
   } catch (error) {
+    if (seq !== state.navSeq) return false;
     // A live timestamp can fail for reasons the list cannot predict, and most of
     // a given day usually does - so remember what this one turned out to be.
     // Otherwise the reader clicks down the list blind, and re-clicks the ones
@@ -501,6 +522,7 @@ function renderSource() {
 
 async function setSource(source) {
   if (state.source === source) return;
+  state.navSeq += 1;   // the in-flight load, if any, belongs to the old channel
   state.source = source;
   state.time = null;
   state.payload = null;
@@ -1391,18 +1413,24 @@ function tdText(text, dim, flagged = false) {
  * leaves the picker on a station the reader can browse from. */
 async function openLatestLive() {
   setBusy(true, "正在找今天最新的实时测次…");
+  const seq = state.navSeq;   // a reader click during the walk takes over: bail
   let found = null;
   try {
     found = await api("/api/live/latest", { date: state.liveDate });
   } catch (error) {
     found = null;
   }
+  if (seq !== state.navSeq) return false;
 
   const candidates = (found && found.candidates) || [];
   for (const candidate of candidates) {
+    if (seq !== state.navSeq) return false;
     const station = state.stations.find((s) => s.code === candidate.station);
     if (!station) continue;
     await selectStation(station, candidate.device);
+    // the reader may have clicked while that list was being pulled - the walk
+    // is over the moment the panel answers to somebody else
+    if (seq !== state.navSeq) return false;
     // the live list is newest-first, so the row this candidate named is in it
     const row = state.measurements.find((r) => r.time === candidate.time);
     if (!row) continue;
@@ -1410,7 +1438,9 @@ async function openLatestLive() {
   }
 
   // nothing today: say what the live channel found, and let the reader move on
-  // rather than sit in front of a board that looks broken
+  // rather than sit in front of a board that looks broken.  A takeover during
+  // the last candidate's export lands here too - say nothing over their view.
+  if (seq !== state.navSeq) return false;
   el("board-empty-line").textContent = candidates.length
     ? `${state.liveDate} 的实时测次都没有重建出来。`
     : (found && found.reason) || `${state.liveDate} 还没有实时测次。`;
@@ -1420,6 +1450,7 @@ async function openLatestLive() {
   // the empty panel back, because `loadMeasurements` hides it on the way out
   // and has nothing of its own to replace it with
   if (state.stations.length && !state.station) await selectStation(state.stations[0]);
+  if (seq !== state.navSeq) return false;
   setBusy(false);
   showEmpty();
   return false;
@@ -1474,6 +1505,7 @@ el("station-search").addEventListener("input", (event) => {
 });
 
 el("error-retry").addEventListener("click", () => {
+  state.navSeq += 1;
   if (state.station) selectStation(state.station);
   else boot();
 });
@@ -1485,6 +1517,7 @@ el("live-date").addEventListener("change", (event) => {
   event.target.value = state.liveDate;
   // the day changed, so the section on the board is about a day the picker is
   // no longer showing
+  state.navSeq += 1;
   state.payload = null;
   if (state.source === "live" && state.station) loadMeasurements();
 });

@@ -96,6 +96,11 @@
                a paragraph.  The threshold and the way back are in the tooltip. -->
           <label class="axis-switch" id="axis-switch">
             <input type="checkbox" id="limit-axis" checked><span>流速轴上限</span><b class="axis-badge" id="axis-badge" hidden></b></label>
+          <!-- One-shot, not a toggle: same quiet pill as the switch it stands
+               beside, unlit.  The file carries every available arm, not only
+               the one on screen. -->
+          <button class="export-btn" id="export-btn" type="button"
+                  title="导出本测次的重建结果（CSV，可用 Excel 打开；含全部模型臂）">导出</button>
         </div>
         <div class="plot-stage" id="plot-stage">
           <svg id="section-svg" role="img" aria-labelledby="plot-desc"></svg>

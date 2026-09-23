@@ -626,6 +626,27 @@ button:active:not(:disabled), .row:active:not(:disabled), .arm:active:not(:disab
 }
 .axis-switch input { accent-color: var(--water); margin: 0; }
 
+/* The export button stands beside the axis switch and wears the same quiet
+   pill, but it is a one-shot, not a toggle - so it never lights up.  What the
+   file contains and why it is CSV is one hover away, not a caption. */
+.export-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-pill);
+  padding: 4px 12px 3px;
+  cursor: pointer;
+  color: var(--ink-2);
+  font-size: 11.5px;
+  white-space: nowrap;
+  box-shadow: var(--sh-1);
+  transition: border-color var(--t) var(--ease), color var(--t) var(--ease),
+              background var(--t) var(--ease), box-shadow var(--t) var(--ease);
+}
+.export-btn:hover { border-color: var(--water); color: var(--water-ink); }
+
 /* How many readings this switch is holding out of the picture.  It is the only
    place the panel still volunteers a number about itself, and it earns that place
    because it is the only control on the page that changes what the figure shows:

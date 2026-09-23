@@ -510,6 +510,87 @@ function liveReason(message) {
   return "拉取失败";
 }
 
+/* -- export ---------------------------------------------------------------
+ * One CSV per measurement, built from the very payload the board is showing,
+ * so the file can never disagree with the figure.  UTF-8 BOM keeps the Chinese
+ * headers intact when the file lands in Excel.  Every available arm is
+ * written, not only the one on screen: the export is the measurement's
+ * record, not a screenshot of a toggle. */
+
+function csvCell(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "number") return String(Number(value.toFixed(4)));
+  const text = String(value);
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function buildExportCsv(payload) {
+  const armIds = Object.keys(payload.lines[0] || {})
+    .filter((key) => key.startsWith("pred_"))
+    .map((key) => key.slice(5));
+  const armLabel = (id) => (state.arms.find((a) => a.id === id) || {}).label || id;
+  // the panel caps the dots per line; the median is over the same sample the
+  // figure shows, which is the honest thing to write down next to the count
+  const byLine = new Map();
+  for (const obs of payload.observations || []) {
+    if (obs.v === null || obs.v === undefined) continue;
+    if (!byLine.has(obs.line)) byLine.set(obs.line, []);
+    byLine.get(obs.line).push(obs.v);
+  }
+  const median = (values) => {
+    if (!values || !values.length) return null;
+    const sorted = values.slice().sort((a, b) => a - b);
+    const mid = sorted.length >> 1;
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  };
+
+  const meta = payload.meta || {};
+  const head = [
+    ["Aether 断面流速重建"],
+    ["站点", `${payload.station} ${payload.station_name || ""}`.trim()],
+    ["设备", payload.device],
+    ["测次", payload.time],
+    ["通道", payload.source === "live" ? "实时" : "已入库"],
+    ["水位 m", meta.water_level],
+    ["河宽 m", meta.water_width],
+    ["断面面积 m²", meta.section_area],
+    ["原始观测来源", meta.raw_source],
+    ["原始段数（面板采样）", (payload.observations || []).length],
+    ["枯水线阀门", `水深 ≤ ${meta.valve_max_depth} m 的测速线重建值归零，本场 ${meta.n_valved} 条`],
+    ["导出于", new Date().toLocaleString("zh-CN", { hour12: false })],
+    [],
+    ["模型", "RMSE m/s", "MAE m/s", "bias m/s", "NSE", "超差线数"],
+    ...armIds.map((id) => {
+      const m = (payload.metrics || {})[id] || {};
+      return [armLabel(id), m.rmse, m.mae, m.bias, m.nse, m.disagreement];
+    }),
+    [],
+    ["测速线", "起点距 m", "水深 m", "河底高程 m", "平台标定流速 m/s",
+     "原始观测中位 m/s", "原始段数", "算法线", "阀门归零",
+     ...armIds.map((id) => `${armLabel(id)} 重建 m/s`)],
+    ...payload.lines.map((line) => [
+      line.i, line.x, line.depth, line.bed, line.target,
+      median(byLine.get(line.i)), line.n_raw, line.algo ? "是" : "否",
+      line.valved ? "是" : "否",
+      ...armIds.map((id) => line[`pred_${id}`]),
+    ]),
+  ];
+  return "﻿" + head.map((row) => row.map(csvCell).join(",")).join("\r\n") + "\r\n";
+}
+
+function exportCurrent() {
+  const payload = state.payload;
+  if (!payload || !payload.lines || !payload.lines.length) return;
+  const stamp = (payload.time || "").slice(0, 16).replace(/[-:]/g, "").replace(" ", "_");
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([buildExportCsv(payload)], { type: "text/csv;charset=utf-8" }));
+  link.download = `Aether_${payload.station}_${stamp}_${payload.source}.csv`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 4000);
+}
+
 /* -- data source --------------------------------------------------------- */
 
 function renderSource() {
@@ -1512,6 +1593,7 @@ el("error-retry").addEventListener("click", () => {
 
 el("src-cache").addEventListener("click", () => setSource("cache"));
 el("src-live").addEventListener("click", () => setSource("live"));
+el("export-btn").addEventListener("click", exportCurrent);
 el("live-date").addEventListener("change", (event) => {
   state.liveDate = event.target.value || todayISO();
   event.target.value = state.liveDate;

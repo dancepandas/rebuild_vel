@@ -3,20 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>断面流速重建 · 模型展示</title>
+<title>断面流速重建工作台</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 
 <header class="rail">
   <div class="brand">
-    <span class="brand-mark" aria-hidden="true"></span>
-    <span class="brand-name">断面流速重建</span>
-  </div>
-
-  <div class="arms" role="radiogroup" aria-label="模型">
-    <span class="arms-label">模型</span>
-    <div class="arms-set" id="arms"></div>
+    <span class="brand-mark" aria-hidden="true">
+      <!-- The A stands in the river: above its crossbar the letterform is ink,
+           below it the water takes the legs, and the crossbar runs on as the
+           waterline.  The same two inks the figure itself is drawn in. -->
+      <svg viewBox="0 0 26 26" width="21" height="21" fill="none">
+        <path class="lm-leg" d="M13 3.6 L5 21.4 M13 3.6 L21 21.4"/>
+        <path class="lm-flood" d="M8.7 13.2 L5 21.4 M17.3 13.2 L21 21.4"/>
+        <path class="lm-waterline" d="M2.4 13.2 H23.6"/>
+      </svg>
+    </span>
+    <span class="brand-name">断面流速重建工作台</span>
   </div>
 
   <div class="rail-right">
@@ -86,6 +90,13 @@
       <figure class="plot">
         <figcaption class="plot-caption">
           <span class="plot-title">断面流速分布</span>
+          <!-- The model switch lives on the figure it drives: the rail stays a
+               clean brand bar, and the names stand next to the line they
+               re-colour. -->
+          <div class="arms" role="radiogroup" aria-label="模型">
+            <span class="arms-label">模型</span>
+            <div class="arms-set" id="arms"></div>
+          </div>
         </figcaption>
         <div class="plot-tools">
           <div class="plot-legend" id="plot-legend"></div>

@@ -472,7 +472,7 @@ async function selectMeasurement(row) {
     setBusy(false);
     showContent();
     renderTitleblock(payload);
-    renderChart(payload);
+    renderChart(payload, { entrance: true });
     renderReadout(payload);
     renderObservations(payload);
     renderMeasurements();
@@ -700,7 +700,7 @@ function sourceLabel(source) {
 
 /* -- the section plot ---------------------------------------------------- */
 
-function renderChart(payload) {
+function renderChart(payload, { entrance = false } = {}) {
   const stage = el("plot-stage");
   const width = Math.max(560, Math.round(stage.clientWidth || 960));
   const W = width;
@@ -712,6 +712,9 @@ function renderChart(payload) {
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.setAttribute("width", W);
   svg.setAttribute("height", H);
+  // entrance choreography hangs off this class; any other draw (arm switch,
+  // layer toggle, resize) leaves it off and the figure redraws instantly
+  svg.setAttribute("class", entrance ? "enter" : "");
 
   const lines = payload.lines;
   const obs = payload.observations;
@@ -807,7 +810,7 @@ function renderChart(payload) {
   const yVel = (v) => Math.min(yWL, yWL - (v / vMax) * hVel);
 
   // -- frame and grid ----------------------------------------------------
-  const g = svgEl("g", { class: "draw-in" });
+  const g = svgEl("g");
   svg.append(g);
 
   const gridTop = svgEl("g");
@@ -859,20 +862,20 @@ function renderChart(payload) {
       .concat(bedPts.map((p) => `L ${p[0]} ${p[1]}`))
       .concat([`L ${sectionRight} ${H - padB}`, "Z"])
       .join(" ");
-    g.append(svgEl("path", { d: bedPath, fill: C.silt, "fill-opacity": 0.85, stroke: "none" }));
+    g.append(svgEl("path", { d: bedPath, fill: C.silt, "fill-opacity": 0.85, stroke: "none", class: "an-bed" }));
 
     // water body: the block between the water surface and the bed
     const waterPath = [`M ${sectionLeft} ${yWL}`]
       .concat(bedPts.map((p) => `L ${p[0]} ${p[1]}`))
       .concat([`L ${sectionRight} ${yWL}`, "Z"])
       .join(" ");
-    g.append(svgEl("path", { d: waterPath, fill: C.water, "fill-opacity": 0.22, stroke: "none" }));
+    g.append(svgEl("path", { d: waterPath, fill: C.water, "fill-opacity": 0.22, stroke: "none", class: "an-water" }));
   }
 
   g.append(svgEl("line", {
     x1: sectionLeft, x2: sectionRight, y1: yWL, y2: yWL,
     stroke: C.water, "stroke-width": 1.4, "stroke-opacity": 0.75,
-    "stroke-linecap": "round",
+    "stroke-linecap": "round", class: "an-wl",
   }));
 
   // -- measuring lines ---------------------------------------------------
@@ -880,13 +883,18 @@ function renderChart(payload) {
   // to the bed, so the section shows where the lines are and how deep the water
   // is over each one.  Its measured velocity is in the velocity panel above.
   const lineGroup = svgEl("g");
-  for (const line of lines) {
-    if (line.x === null || line.depth === null || line.depth < 0.01) continue;
+  const wetLines = lines.filter((l) => l.x !== null && l.depth !== null && l.depth >= 0.01);
+  let lineIdx = 0;
+  for (const line of wetLines) {
     const x = sx(line.x);
+    // entrance: the lines sound in order, left to right; otherwise no style
+    const frac = wetLines.length > 1 ? lineIdx / (wetLines.length - 1) : 0;
     lineGroup.append(svgEl("line", {
       x1: x, x2: x, y1: yWL, y2: yDepth(line.depth),
       stroke: C.water, "stroke-width": 1, "stroke-opacity": 0.42,
+      class: "an-line", style: `animation-delay:${(0.18 + frac * 0.22).toFixed(3)}s`,
     }));
+    lineIdx += 1;
   }
   g.append(lineGroup);
 
@@ -895,14 +903,18 @@ function renderChart(payload) {
   // says the line exists and is dry, which is itself the physical finding.
   if (state.layers.dry) {
     const group = svgEl("g");
-    for (const line of lines) {
-      if (line.x === null || line.depth === null || line.depth >= 0.01) continue;
+    const dryLines = lines.filter((l) => l.x !== null && l.depth !== null && l.depth < 0.01);
+    let dryIdx = 0;
+    for (const line of dryLines) {
       const x = sx(line.x);
+      const frac = dryLines.length > 1 ? dryIdx / (dryLines.length - 1) : 0;
       group.append(svgEl("line", {
         x1: x, x2: x, y1: yWL - 1, y2: yWL + 4,
         stroke: C.hair, "stroke-width": 2.4, "stroke-opacity": 0.85,
-        "stroke-linecap": "round",
+        "stroke-linecap": "round", class: "an-dry",
+        style: `animation-delay:${(0.3 + frac * 0.15).toFixed(3)}s`,
       }));
+      dryIdx += 1;
     }
     if (group.children.length) g.append(group);
   }
@@ -934,24 +946,25 @@ function renderChart(payload) {
       .concat(profile.map((p) => `L ${p.x} ${p.y}`))
       .concat([`L ${profile[profile.length - 1].x} ${yWL}`, "Z"])
       .join(" ");
-    band.append(svgEl("path", { d: area, fill: C.water, "fill-opacity": 0.18, stroke: "none" }));
+    band.append(svgEl("path", { d: area, fill: C.water, "fill-opacity": 0.18, stroke: "none", class: "an-area" }));
     const line = [`M ${profile[0].x} ${profile[0].y}`]
       .concat(profile.slice(1).map((p) => `L ${p.x} ${p.y}`))
       .join(" ");
     const path = svgEl("path", {
       d: line, fill: "none", stroke: C.water, "stroke-width": 2.1,
       "stroke-linecap": "round", "stroke-linejoin": "round",
-      "stroke-linejoin": "round", "stroke-linecap": "round",
     });
     band.append(path);
-    // one orchestrated reveal: the profile draws itself on load
-    if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    // one orchestrated reveal on arrival: the profile draws itself after the
+    // section has sounded.  Arm switches and layer toggles redraw instantly -
+    // a control owes its reader an answer, not a replay
+    if (entrance && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       const length = path.getTotalLength ? path.getTotalLength() : 0;
       if (length) {
         path.style.strokeDasharray = length;
         path.style.strokeDashoffset = length;
         path.getBoundingClientRect();
-        path.style.transition = "stroke-dashoffset .7s cubic-bezier(.22,.61,.36,1)";
+        path.style.transition = "stroke-dashoffset .65s cubic-bezier(.22,.61,.36,1) .45s";
         path.style.strokeDashoffset = 0;
       }
     }
@@ -969,7 +982,7 @@ function renderChart(payload) {
       band.append(svgEl("path", {
         d, fill: "none", stroke: C.ink, "stroke-width": 1.25,
       "stroke-linecap": "round", "stroke-linejoin": "round",
-        "stroke-dasharray": "5 3", "stroke-opacity": 0.85,
+        "stroke-dasharray": "5 3", "stroke-opacity": 0.85, class: "an-target",
       }));
     }
   }
@@ -981,10 +994,14 @@ function renderChart(payload) {
   // back - a reading held back without a word is a silent edit to the record.
   if (state.layers.raw) {
     const group = svgEl("g", { fill: C.field });
+    const span = x1 - x0 || 1;
     for (const o of obs) {
       if (o.x === null || o.v === null) continue;
+      // entrance: the readings sweep in left to right, like the pass being made
+      const frac = finite(o.x) ? Math.min(1, Math.max(0, (o.x - x0) / span)) : 0;
       group.append(svgEl("circle", {
         cx: sx(o.x), cy: yVel(o.v), r: 2.7, "fill-opacity": 0.78,
+        class: "an-dot", style: `animation-delay:${(0.75 + frac * 0.5).toFixed(3)}s`,
       }));
     }
     band.append(group);

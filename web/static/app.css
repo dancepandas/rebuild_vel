@@ -194,21 +194,29 @@ button:active:not(:disabled), .row:active:not(:disabled), .arm:active:not(:disab
   z-index: 20;
 }
 
-.brand { display: flex; align-items: center; gap: 9px; }
+.brand { display: flex; align-items: center; gap: 10px; }
 
-.brand-mark {
-  width: 16px; height: 16px;
-  background: var(--water);
-  /* a section profile in miniature: deep in the middle, banks at the edges */
-  clip-path: polygon(0 0, 0 46%, 22% 62%, 50% 100%, 78% 62%, 100% 46%, 100% 0);
-  filter: drop-shadow(0 2px 5px rgba(51, 112, 255, .38));
-}
+/* The mark is a letter, not a blob: a surveyor's A standing in the water.
+   Above the crossbar the letterform wears the ink everything else does;
+   below it the water takes the legs and the crossbar itself runs on as the
+   waterline.  Two strokes in the figure's own two inks - the logo never
+   introduces a third colour. */
+.brand-mark { display: inline-flex; }
+.brand-mark svg { display: block; }
+.lm-leg { stroke: var(--ink); stroke-width: 2.7; stroke-linecap: round; stroke-linejoin: round; }
+.lm-flood { stroke: var(--water); stroke-width: 2.7; stroke-linecap: round; }
+.lm-waterline { stroke: var(--water); stroke-width: 1.7; stroke-linecap: round; opacity: .85; }
 
 .brand-name { font-weight: 600; letter-spacing: .04em; }
 
 .arms { display: flex; align-items: center; gap: 12px; }
 
 .arms-label { color: var(--ink-3); font-size: 12px; }
+
+/* On the figure's caption the names pair with the switch row to their right;
+   the set tightens so the three names read as one control next to the pills. */
+.plot-caption .arms { gap: 10px; }
+.plot-caption .arms-set { gap: 16px; }
 
 /* The model names: a name row, not a switch.  Pills read as free-standing
    buttons, and three same-shaped buttons between the brand and the layers
@@ -837,19 +845,51 @@ button:active:not(:disabled), .row:active:not(:disabled), .arm:active:not(:disab
 
 /* -- motion -------------------------------------------------------------- */
 
-/* the one orchestrated moment: a new measurement rises into place.  It runs
-   once per draw, not per element - a stagger on every card is the tell of a
-   generated page, and there is nothing here that is a sequence. */
-.draw-in { animation: draw-in .42s var(--ease) both; }
-@keyframes draw-in {
-  from { opacity: 0; transform: translateY(7px) scale(.995); }
-  to   { opacity: 1; transform: none; }
+/* The one orchestrated moment, and it is a process rather than a fade: a new
+   measurement arrives the way a section is actually sounded.  The bed rises
+   into its profile, the water fills below the waterline, the sounding lines
+   drop one after another, and only then does the reconstruction draw itself -
+   raw segments sweep in last, left to right, like readings being taken.
+   Everything finishes inside ~1.6s and nothing re-runs when the reader
+   switches arms or layers: those redraw instantly, which is what a control
+   owes its reader.  Every rule hangs off .enter on the svg, set only on the
+   draw that a fresh measurement triggered. */
+@keyframes k-rise { from { transform: scaleY(0); } }
+@keyframes k-stretch { from { transform: scaleX(0); } }
+@keyframes k-drop { from { transform: scaleY(0); } }
+@keyframes k-fade { from { opacity: 0; } }
+@keyframes k-dot { from { opacity: 0; transform: translateY(3px); } }
+
+.enter .an-bed {
+  transform-box: fill-box; transform-origin: 50% 100%;
+  animation: k-rise .5s var(--ease) both;
 }
+.enter .an-water {
+  transform-box: fill-box; transform-origin: 50% 0%;
+  animation: k-rise .55s .08s var(--ease) both;
+}
+.enter .an-wl {
+  transform-box: fill-box; transform-origin: 0 50%;
+  animation: k-stretch .45s var(--ease) both;
+}
+.enter .an-line {
+  transform-box: fill-box; transform-origin: 50% 0%;
+  animation: k-drop .3s var(--ease) both;
+}
+.enter .an-dry {
+  transform-box: fill-box; transform-origin: 50% 0%;
+  animation: k-drop .25s var(--ease) both;
+}
+.enter .an-area { animation: k-fade .4s .5s var(--ease) both; }
+.enter .an-target { animation: k-fade .35s .7s var(--ease) both; }
+.enter .an-dot { animation: k-dot .3s var(--ease) both; }
 
 .scrim { position: fixed; inset: 0; z-index: 10; }
 
 @media (prefers-reduced-motion: reduce) {
-  .draw-in, .layers-menu, .tip { animation: none; }
+  .enter .an-bed, .enter .an-water, .enter .an-wl, .enter .an-line,
+  .enter .an-dry, .enter .an-area, .enter .an-target, .enter .an-dot,
+  .layers-menu, .tip { animation: none; }
   .spinner { animation-duration: 2s; }
   button:active, .row:active, .arm:active { transform: none; }
   * { transition-duration: 1ms !important; }

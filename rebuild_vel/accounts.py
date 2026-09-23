@@ -27,6 +27,7 @@ class AccountPool:
             raise ValueError(f"no accounts found in {path}")
         self._cycle: Iterator[tuple[int, str, str]] = itertools.cycle(self._accounts)
         self._lock = threading.Lock()
+        self._by_slot = {slot: (username, password) for slot, username, password in self._accounts}
         # slot -> username mapping for trace logging (passwords never logged)
         self.slots = {slot: username for slot, username, _ in self._accounts}
 
@@ -36,3 +37,7 @@ class AccountPool:
     def next(self) -> tuple[int, str, str]:
         with self._lock:
             return next(self._cycle)
+
+    def credentials(self, slot: int) -> tuple[str, str]:
+        """(username, password) for a slot — passwords never leave this class."""
+        return self._by_slot[slot]

@@ -36,6 +36,7 @@ if str(REPO_ROOT) not in sys.path:
 from web.index import DEFAULT_DATA_ROOT, DEFAULT_INDEX_PATH, SectionStore, load_index  # noqa: E402
 from web.infer import ArmRegistry  # noqa: E402
 from web.payload import build_payload  # noqa: E402
+from rebuild_vel.client import PermanentAPIError  # noqa: E402
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -337,6 +338,14 @@ class Service:
                 "deviceCode": device,
                 "measureTimeList": [when],
             })
+        except PermanentAPIError as exc:
+            # 平台确认这个测次没有过程数据文件——不是通道故障，是数据本身
+            # 不存在（测次太新或设备未上传），按找不到资源处理。
+            if "没有过程数据文件" in str(exc):
+                raise ServiceError(
+                    HTTPStatus.NOT_FOUND,
+                    f"该测次在平台上没有过程数据文件（{when}）") from exc
+            raise ServiceError(HTTPStatus.BAD_GATEWAY, f"平台导出失败：{exc}") from exc
         except Exception as exc:  # noqa: BLE001
             raise ServiceError(HTTPStatus.BAD_GATEWAY, f"平台导出失败：{exc}") from exc
         if not payload:

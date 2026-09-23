@@ -31,6 +31,12 @@ TRANSIENT_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 AUTH_STATUS = frozenset({401})
 PERMANENT_STATUS = frozenset({400, 403, 404, 405, 409, 410, 422})
 
+#: Business-level messages that mean "the platform's anti-duplicate guard
+#: tripped" (提交去重).  Not an error in the data: the identical export was
+#: seen moments ago, so the request is retried through the backoff loop
+#: instead of failing the caller.
+RETRYABLE_MESSAGES = ("不允许重复提交",)
+
 
 class RemoteAPIError(RuntimeError):
     """The remote API rejected a request or returned malformed data."""
@@ -55,10 +61,11 @@ class FlowClient:
         timeout: float = 60.0,
         max_attempts: int = 6,
         request_delay: float = 0.2,
+        login_retry_after: float = 900.0,
         session: Any = None,
         sleep=time.sleep,
     ) -> None:
-        if max_attempts < 1 or timeout <= 0 or request_delay < 0:
+        if max_attempts < 1 or timeout <= 0 or request_delay < 0 or login_retry_after < 0:
             raise ValueError("invalid retry/timeout settings")
         if session is None:
             import requests
@@ -69,10 +76,14 @@ class FlowClient:
         self.timeout = float(timeout)
         self.max_attempts = int(max_attempts)
         self.request_delay = float(request_delay)
+        self.login_retry_after = float(login_retry_after)
         self.session = session
         self.sleep = sleep
         # slot -> token
         self._tokens: Dict[int, str] = {}
+        # slot -> monotonic timestamp until which login failures are not retried;
+        # a suspended/expired account must never sink every Nth request
+        self._cooldown_until: Dict[int, float] = {}
         self._last_request_at = 0.0
 
     # -- auth -------------------------------------------------------------
@@ -91,10 +102,53 @@ class FlowClient:
             raise AuthenticationError("login response did not contain a token")
         self._tokens[slot] = str(token)
 
+    def _ensure_slot(self) -> int:
+        """Acquire a logged-in account slot, skipping ones whose login fails.
+
+        A slot whose login is rejected goes into cooldown for
+        ``login_retry_after`` seconds so a single suspended/expired account
+        cannot fail every Nth request; the cooldown expires on its own in case
+        the account is renewed on the platform side.
+        """
+        now = time.monotonic()
+        for _ in range(len(self.accounts)):
+            slot, username, password = self.accounts.next()
+            if now < self._cooldown_until.get(slot, 0.0):
+                continue
+            if slot in self._tokens:
+                return slot
+            try:
+                self._login(slot, username, password)
+                self._cooldown_until.pop(slot, None)
+                return slot
+            except AuthenticationError:
+                self._cooldown_until[slot] = now + self.login_retry_after
+                logger.warning(
+                    "account slot %s (%s) login failed; cooling down %.0fs",
+                    slot, username, self.login_retry_after,
+                )
+        raise AuthenticationError("no account in the pool could log in")
+
     def _throttle(self) -> None:
         remaining = self.request_delay - (time.monotonic() - self._last_request_at)
         if remaining > 0:
             self.sleep(remaining)
+
+    @staticmethod
+    def _business_error(endpoint: str, payload: Mapping[str, Any]) -> RemoteAPIError:
+        """Build the right error for a non-zero business code.
+
+        Permanent for real business rejections (e.g. 测次没有过程数据文件);
+        transient for the anti-duplicate guard, which fires on identical
+        export resubmission and clears on its own.
+        """
+        msg = str(payload.get("msg", ""))
+        kind = (
+            RemoteAPIError
+            if any(marker in msg for marker in RETRYABLE_MESSAGES)
+            else PermanentAPIError
+        )
+        return kind(f"API {endpoint} returned code={payload.get('code')}: {msg}")
 
     # -- core -------------------------------------------------------------
     def post(self, endpoint: str, body: Mapping[str, Any]) -> Dict[str, Any]:
@@ -109,9 +163,7 @@ class FlowClient:
             response = None
             try:
                 if slot is None:
-                    slot, username, password = self.accounts.next()
-                    if slot not in self._tokens:
-                        self._login(slot, username, password)
+                    slot = self._ensure_slot()
                 self._throttle()
                 response = self.session.post(
                     self.base_url + endpoint,
@@ -142,9 +194,7 @@ class FlowClient:
                 code = payload.get("code")
                 if code not in (0, 200):
                     # Some export endpoints return business codes for empty input.
-                    raise PermanentAPIError(
-                        f"API {endpoint} returned code={code}: {payload.get('msg', '')}"
-                    )
+                    raise self._business_error(endpoint, payload)
                 return payload
             except (KeyboardInterrupt, SystemExit):
                 raise
@@ -169,9 +219,7 @@ class FlowClient:
         for attempt in range(self.max_attempts):
             try:
                 if slot is None:
-                    slot, username, password = self.accounts.next()
-                    if slot not in self._tokens:
-                        self._login(slot, username, password)
+                    slot = self._ensure_slot()
                 self._throttle()
                 response = self.session.post(
                     self.base_url + endpoint,
@@ -197,9 +245,7 @@ class FlowClient:
                     payload = response.json()
                     code = payload.get("code")
                     if code not in (0, 200):
-                        raise PermanentAPIError(
-                            f"API {endpoint} returned code={code}: {payload.get('msg', '')}"
-                        )
+                        raise self._business_error(endpoint, payload)
                     return b""
                 if body_bytes[:2] != b"PK":
                     raise RemoteAPIError(f"API {endpoint} returned non-xlsx payload")

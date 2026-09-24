@@ -192,6 +192,18 @@ class FlowClient:
                 response.raise_for_status()
                 payload = response.json()
                 code = payload.get("code")
+                if code in AUTH_STATUS:
+                    # the platform also reports an expired/revoked token as a
+                    # business code on a 200 response - same medicine as an
+                    # HTTP 401: drop the token, re-login (or rotate), retry
+                    self._tokens.pop(slot, None)
+                    slot = None
+                    if relogged:
+                        raise AuthenticationError(
+                            f"authentication kept failing for {endpoint}"
+                        )
+                    relogged = True
+                    continue
                 if code not in (0, 200):
                     # Some export endpoints return business codes for empty input.
                     raise self._business_error(endpoint, payload)
@@ -244,6 +256,12 @@ class FlowClient:
                 if "json" in content_type:
                     payload = response.json()
                     code = payload.get("code")
+                    if code in AUTH_STATUS:
+                        # expired token reported as a business code - drop it
+                        # and re-login (or rotate) instead of failing the read
+                        self._tokens.pop(slot, None)
+                        slot = None
+                        continue
                     if code not in (0, 200):
                         raise self._business_error(endpoint, payload)
                     return b""

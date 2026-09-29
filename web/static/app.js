@@ -507,6 +507,10 @@ function liveReason(message) {
   // this one is worth saying "try again" about rather than writing off
   if (/下载失败|导出失败|returned code=5\d\d/.test(text)) return "导出失败，可重试";
   if (/未通过质检/.test(text)) return "未通过质检";
+  // the credentials, not the measurement: when the account pool is down every
+  // row on the page says the same thing, and it is the one outcome a reader can
+  // act on - "拉取失败" would send them clicking the next timestamp instead
+  if (/账号池|账号停用|账号过期|密码错误|账号不存在/.test(text)) return "平台账号不可用";
   return "拉取失败";
 }
 
@@ -1539,11 +1543,19 @@ async function openLatestLive() {
   // rather than sit in front of a board that looks broken.  A takeover during
   // the last candidate's export lands here too - say nothing over their view.
   if (seq !== state.navSeq) return false;
-  el("board-empty-line").textContent = candidates.length
-    ? `${state.liveDate} 的实时测次都没有重建出来。`
-    : (found && found.reason) || `${state.liveDate} 还没有实时测次。`;
-  el("board-empty-sub").textContent =
-    "换一天，或者切到 已入库 看历史测次；左边选站点和测次也可以。";
+  // A dead account pool is not a quiet day: every date and every station fails
+  // the same way, so "换一天试试" would send the reader clicking through a
+  // calendar that cannot answer.  Name the outage, and point at what still works.
+  const why = String((found && found.reason) || "");
+  const poolDown = /账号池|账号停用|账号过期|密码错误|账号不存在/.test(why);
+  el("board-empty-line").textContent = poolDown
+    ? "平台账号全部无法登录，实时通道暂停。"
+    : candidates.length
+      ? `${state.liveDate} 的实时测次都没有重建出来。`
+      : why || `${state.liveDate} 还没有实时测次。`;
+  el("board-empty-sub").textContent = poolDown
+    ? `${why.replace(/^平台查询失败：/, "")}；已入库的历史测次仍可查看。`
+    : "换一天，或者切到 已入库 看历史测次；左边选站点和测次也可以。";
   // put the picker on a station first so neither list is left empty - then put
   // the empty panel back, because `loadMeasurements` hides it on the way out
   // and has nothing of its own to replace it with

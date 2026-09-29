@@ -1088,17 +1088,32 @@ async function fetchPayload(station, device, time, source) {
       for (const p of problems) console.error(`FAIL  live/latest: ${p}`);
       failures += problems.length;
       if (!problems.length) {
+        // an empty candidate list is a result, not a crash: on a day the live
+        // channel has nothing, *why* it has nothing is the finding
+        const newest = (latest.candidates || [])[0];
         console.log(`live/latest ${LIVE}: ${latest.probed} device(s) asked, ` +
                     `${(latest.candidates || []).length} candidate(s), newest ` +
-                    `${(latest.candidates || [{ time: "—" }])[0].time}`);
+                    `${newest ? newest.time : "—"}` +
+                    (!newest && latest.reason ? ` — ${latest.reason}` : ""));
       }
     }
     for (const st of all) {
       if (checked >= LIVE_STATIONS) break;
       const dev = st.devices[Math.floor(Math.random() * st.devices.length)].device;
       checked += 1;
-      const rows = (await (await fetch(`${BASE}/api/live/measurements?station=${encodeURIComponent(st.code)}` +
-        `&device=${encodeURIComponent(dev)}&begin=${LIVE}&end=${LIVE}`)).json()).measurements || [];
+      const listed = await (await fetch(`${BASE}/api/live/measurements?station=${encodeURIComponent(st.code)}` +
+        `&device=${encodeURIComponent(dev)}&begin=${LIVE}&end=${LIVE}`)).json();
+      if (listed.error) {
+        // a channel-wide refusal is not an empty day.  Bucketing it as one is
+        // exactly how a dead account pool gets read as "no measurements today",
+        // which hides the one thing the tally exists to say
+        const text = String(listed.error);
+        const cut = Math.max(text.indexOf("："), text.indexOf(":"));
+        const why = ((cut >= 0 ? text.slice(cut + 1) : text).trim().split("（")[0] || "其他").slice(0, 24);
+        reasons.set(why, (reasons.get(why) || 0) + 1);
+        continue;
+      }
+      const rows = listed.measurements || [];
       if (!rows.length) { reasons.set("当天无测次", (reasons.get("当天无测次") || 0) + 1); continue; }
       for (const row of rows) {
         // read the body rather than going through fetchPayload: a live rejection

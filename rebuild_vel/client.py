@@ -37,6 +37,25 @@ PERMANENT_STATUS = frozenset({400, 403, 404, 405, 409, 410, 422})
 #: instead of failing the caller.
 RETRYABLE_MESSAGES = ("不允许重复提交",)
 
+#: Platform wording for a rejected login, mapped to the short reason the panel
+#: shows.  Anything unrecognised passes through unchanged: an outage nobody has
+#: seen before still has to be able to say what it is.
+AUTH_REASONS = (
+    ("停用", "账号停用"),
+    ("禁用", "账号停用"),
+    ("密码", "密码错误"),
+    ("不存在", "账号不存在"),
+    ("过期", "账号过期"),
+)
+
+
+def auth_reason(detail: str) -> str:
+    """Short reader-facing reason for a rejected login."""
+    for marker, reason in AUTH_REASONS:
+        if marker in detail:
+            return reason
+    return detail.strip()
+
 
 class RemoteAPIError(RuntimeError):
     """The remote API rejected a request or returned malformed data."""
@@ -84,6 +103,8 @@ class FlowClient:
         # slot -> monotonic timestamp until which login failures are not retried;
         # a suspended/expired account must never sink every Nth request
         self._cooldown_until: Dict[int, float] = {}
+        # slot -> why it was cooled down, so a pool-wide failure can name it
+        self._cooldown_reason: Dict[int, str] = {}
         self._last_request_at = 0.0
 
     # -- auth -------------------------------------------------------------
@@ -97,37 +118,70 @@ class FlowClient:
         if getattr(response, "status_code", None) in PERMANENT_STATUS | AUTH_STATUS:
             raise AuthenticationError(f"login rejected with status {response.status_code}")
         response.raise_for_status()
-        token = response.json().get("token")
+        payload = response.json()
+        token = payload.get("token")
         if not token:
-            raise AuthenticationError("login response did not contain a token")
+            # A suspended account answers HTTP 200 with a business code and a
+            # message, and no token.  Keep the message: a pool that is down has
+            # to be able to say why it is down.
+            detail = str(payload.get("msg") or payload.get("message") or "")
+            raise AuthenticationError(auth_reason(detail) or "登录响应中没有令牌")
         self._tokens[slot] = str(token)
 
     def _ensure_slot(self) -> int:
-        """Acquire a logged-in account slot, skipping ones whose login fails.
+        """Acquire a logged-in account slot.
 
         A slot whose login is rejected goes into cooldown for
-        ``login_retry_after`` seconds so a single suspended/expired account
-        cannot fail every Nth request; the cooldown expires on its own in case
-        the account is renewed on the platform side.
+        ``login_retry_after`` seconds so a single suspended account cannot fail
+        every Nth request.  The cooldown is a scheduling preference, not a lock:
+        once every slot is cooling down the pool is about to fail outright, and
+        re-trying a refused login beats refusing to serve - which is also how a
+        renewed account is picked up without restarting the service.  A slot
+        proven dead in this same call is not tried twice, so a dead pool costs
+        one login per account and no more.
         """
         now = time.monotonic()
-        for _ in range(len(self.accounts)):
-            slot, username, password = self.accounts.next()
-            if now < self._cooldown_until.get(slot, 0.0):
-                continue
-            if slot in self._tokens:
-                return slot
-            try:
-                self._login(slot, username, password)
+        refused: Dict[int, tuple[str, str]] = {}
+        proven_dead: set[int] = set()
+        for attempt in range(2):
+            for _ in range(len(self.accounts)):
+                slot, username, password = self.accounts.next()
+                if slot in self._tokens:
+                    return slot
+                if slot in proven_dead:
+                    continue
+                if attempt == 0 and now < self._cooldown_until.get(slot, 0.0):
+                    refused[slot] = (username, self._cooldown_reason.get(slot, "登录失败"))
+                    continue
+                if attempt == 1:
+                    self._throttle()
+                try:
+                    self._login(slot, username, password)
+                except AuthenticationError as exc:
+                    self._cooldown_until[slot] = time.monotonic() + self.login_retry_after
+                    self._cooldown_reason[slot] = str(exc)
+                    proven_dead.add(slot)
+                    refused[slot] = (username, str(exc))
+                    logger.warning(
+                        "account slot %s (%s) login failed (%s); cooling down %.0fs",
+                        slot, username, exc, self.login_retry_after,
+                    )
+                    continue
                 self._cooldown_until.pop(slot, None)
+                self._cooldown_reason.pop(slot, None)
                 return slot
-            except AuthenticationError:
-                self._cooldown_until[slot] = now + self.login_retry_after
-                logger.warning(
-                    "account slot %s (%s) login failed; cooling down %.0fs",
-                    slot, username, self.login_retry_after,
-                )
-        raise AuthenticationError("no account in the pool could log in")
+        raise AuthenticationError(self._pool_down_message(refused))
+
+    @staticmethod
+    def _pool_down_message(refused: Mapping[int, tuple[str, str]]) -> str:
+        """One line naming every account and why it was refused."""
+        grouped: Dict[str, list[str]] = {}
+        for username, reason in refused.values():
+            grouped.setdefault(reason, []).append(username)
+        detail = "；".join(
+            f"{'、'.join(names)}：{reason}" for reason, names in grouped.items()
+        )
+        return f"账号池 {len(refused)} 个账号全部无法登录（{detail}）"
 
     def _throttle(self) -> None:
         remaining = self.request_delay - (time.monotonic() - self._last_request_at)

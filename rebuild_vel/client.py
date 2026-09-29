@@ -141,6 +141,13 @@ class FlowClient:
         one login per account and no more.
         """
         now = time.monotonic()
+        if self.accounts.reload_if_changed():
+            # the credentials on disk were renewed.  Tokens and cooldowns are
+            # keyed by slot and the slots have just been rebuilt underneath them,
+            # so drop both and let the fresh file have its say
+            self._tokens.clear()
+            self._cooldown_until.clear()
+            self._cooldown_reason.clear()
         refused: Dict[int, tuple[str, str]] = {}
         proven_dead: set[int] = set()
         for attempt in range(2):

@@ -214,7 +214,7 @@ class Service:
         # the last answer to "what is newest today", keyed by date and kept for
         # a couple of minutes - a roomful of readers refreshing the panel would
         # otherwise each set off a dozen platform questions to hear the same one
-        self._latest: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._latest: dict[str, tuple[float, dict[str, Any], float]] = {}
 
     # -- platform API ------------------------------------------------------
     def _flow_client(self) -> Any:
@@ -257,6 +257,11 @@ class Service:
     LIVE_LATEST_DEVICES = 12
     LIVE_LATEST_WANT = 5
     LIVE_LATEST_TTL = 120.0
+    #: A day that came back with nothing is either an outage or a quiet day, and
+    #: it is worth holding for the room either way - but not for two minutes: the
+    #: reader who has just renewed a suspended account should not be told it is
+    #: still suspended long after it works again.
+    LIVE_LATEST_FAIL_TTL = 20.0
 
     def live_latest(self, date: str) -> dict[str, Any]:
         """The newest live device-days on ``date``, newest first.
@@ -281,7 +286,7 @@ class Service:
         key = f"{date}|{self.LIVE_LATEST_WANT}"
         now = time.monotonic()
         hit = self._latest.get(key)
-        if hit and now - hit[0] < self.LIVE_LATEST_TTL:
+        if hit and now - hit[0] < hit[2]:
             return hit[1]
 
         ranked: list[tuple[str, str, str, str]] = []
@@ -317,7 +322,8 @@ class Service:
             "candidates": candidates[: self.LIVE_LATEST_WANT],
             "reason": "" if candidates else failure,
         }
-        self._latest[key] = (now, out)
+        ttl = self.LIVE_LATEST_TTL if candidates else self.LIVE_LATEST_FAIL_TTL
+        self._latest[key] = (now, out, ttl)
         self.log(f"  live/latest {date}: {probed} device(s) asked, "
                  f"{len(candidates)} with data")
         return out
